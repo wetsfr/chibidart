@@ -143,7 +143,20 @@ static void concatenate(cd_State* cd) {
     cd_push(cd, OBJ_VAL(result));
 }
 
+static bool as_number(Value v, double* out) {
+    if (IS_FLOAT(v)) {
+        *out = AS_FLOAT(v);
+        return true;
+    }
+    if (IS_INT(v)) {
+        *out = (double)AS_INT(v);
+        return true;
+    }
+    return false;
+}
+
 int cd_vm_run(cd_State* cd) {
+    if (cd->frameCount <= 0) return CD_ERR_RUNTIME;
     CallFrame* frame = &cd->frames[cd->frameCount - 1];
 
 #define READ_BYTE() (*frame->ip++)
@@ -152,14 +165,23 @@ int cd_vm_run(cd_State* cd) {
 #define READ_STRING() AS_STRING(READ_CONSTANT())
 #define BINARY_INT_OP(op) \
     do { \
+        if (!IS_INT(cd_peek(cd, 0)) || !IS_INT(cd_peek(cd, 1))) { \
+            cd_runtime_error(cd, "Operands must be integers."); \
+            return CD_ERR_RUNTIME; \
+        } \
         int64_t b = AS_INT(cd_pop_val(cd)); \
         int64_t a = AS_INT(cd_pop_val(cd)); \
         cd_push(cd, INT_VAL(a op b)); \
     } while (false)
 #define BINARY_FLOAT_OP(op) \
     do { \
-        double b = AS_FLOAT(cd_pop_val(cd)); \
-        double a = AS_FLOAT(cd_pop_val(cd)); \
+        double b, a; \
+        if (!as_number(cd_peek(cd, 0), &b) || !as_number(cd_peek(cd, 1), &a)) { \
+            cd_runtime_error(cd, "Operands must be numbers."); \
+            return CD_ERR_RUNTIME; \
+        } \
+        cd_pop_val(cd); \
+        cd_pop_val(cd); \
         cd_push(cd, FLOAT_VAL(a op b)); \
     } while (false)
 
@@ -218,12 +240,20 @@ int cd_vm_run(cd_State* cd) {
                 break;
             }
             case OP_GREATER: {
+                if (!IS_INT(cd_peek(cd, 0)) || !IS_INT(cd_peek(cd, 1))) {
+                    cd_runtime_error(cd, "Operands must be integers.");
+                    return CD_ERR_RUNTIME;
+                }
                 int64_t b = AS_INT(cd_pop_val(cd));
                 int64_t a = AS_INT(cd_pop_val(cd));
                 cd_push(cd, BOOL_VAL(a > b));
                 break;
             }
             case OP_LESS: {
+                if (!IS_INT(cd_peek(cd, 0)) || !IS_INT(cd_peek(cd, 1))) {
+                    cd_runtime_error(cd, "Operands must be integers.");
+                    return CD_ERR_RUNTIME;
+                }
                 int64_t b = AS_INT(cd_pop_val(cd));
                 int64_t a = AS_INT(cd_pop_val(cd));
                 cd_push(cd, BOOL_VAL(a < b));
@@ -243,20 +273,36 @@ int cd_vm_run(cd_State* cd) {
             case OP_SUB: BINARY_INT_OP(-); break;
             case OP_MUL: BINARY_INT_OP(*); break;
             case OP_DIV: {
+                if (!IS_INT(cd_peek(cd, 0)) || !IS_INT(cd_peek(cd, 1))) {
+                    cd_runtime_error(cd, "Operands must be integers.");
+                    return CD_ERR_RUNTIME;
+                }
                 int64_t b = AS_INT(cd_pop_val(cd));
                 int64_t a = AS_INT(cd_pop_val(cd));
                 if (b == 0) {
                     cd_runtime_error(cd, "Division by zero.");
                     return CD_ERR_RUNTIME;
                 }
+                if (a == INT64_MIN && b == -1) {
+                    cd_runtime_error(cd, "Integer overflow in division.");
+                    return CD_ERR_RUNTIME;
+                }
                 cd_push(cd, INT_VAL(a / b));
                 break;
             }
             case OP_MOD: {
+                if (!IS_INT(cd_peek(cd, 0)) || !IS_INT(cd_peek(cd, 1))) {
+                    cd_runtime_error(cd, "Operands must be integers.");
+                    return CD_ERR_RUNTIME;
+                }
                 int64_t b = AS_INT(cd_pop_val(cd));
                 int64_t a = AS_INT(cd_pop_val(cd));
                 if (b == 0) {
                     cd_runtime_error(cd, "Modulo by zero.");
+                    return CD_ERR_RUNTIME;
+                }
+                if (a == INT64_MIN && b == -1) {
+                    cd_runtime_error(cd, "Integer overflow in modulo.");
                     return CD_ERR_RUNTIME;
                 }
                 cd_push(cd, INT_VAL(a % b));
@@ -267,26 +313,54 @@ int cd_vm_run(cd_State* cd) {
             case OP_FMUL: BINARY_FLOAT_OP(*); break;
             case OP_FDIV: BINARY_FLOAT_OP(/); break;
             case OP_FGREATER: {
-                double b = AS_FLOAT(cd_pop_val(cd));
-                double a = AS_FLOAT(cd_pop_val(cd));
+                double b, a;
+                if (!as_number(cd_peek(cd, 0), &b) || !as_number(cd_peek(cd, 1), &a)) {
+                    cd_runtime_error(cd, "Operands must be numbers.");
+                    return CD_ERR_RUNTIME;
+                }
+                cd_pop_val(cd);
+                cd_pop_val(cd);
                 cd_push(cd, BOOL_VAL(a > b));
                 break;
             }
             case OP_FLESS: {
-                double b = AS_FLOAT(cd_pop_val(cd));
-                double a = AS_FLOAT(cd_pop_val(cd));
+                double b, a;
+                if (!as_number(cd_peek(cd, 0), &b) || !as_number(cd_peek(cd, 1), &a)) {
+                    cd_runtime_error(cd, "Operands must be numbers.");
+                    return CD_ERR_RUNTIME;
+                }
+                cd_pop_val(cd);
+                cd_pop_val(cd);
                 cd_push(cd, BOOL_VAL(a < b));
                 break;
             }
-            case OP_FNEGATE:
-                cd_push(cd, FLOAT_VAL(-AS_FLOAT(cd_pop_val(cd))));
+            case OP_FNEGATE: {
+                double a;
+                if (!as_number(cd_peek(cd, 0), &a)) {
+                    cd_runtime_error(cd, "Operand must be a number.");
+                    return CD_ERR_RUNTIME;
+                }
+                cd_pop_val(cd);
+                cd_push(cd, FLOAT_VAL(-a));
                 break;
-            case OP_NOT:
+            }
+            case OP_NOT: {
+                if (!IS_BOOL(cd_peek(cd, 0))) {
+                    cd_runtime_error(cd, "Operand must be a boolean.");
+                    return CD_ERR_RUNTIME;
+                }
                 cd_push(cd, BOOL_VAL(!AS_BOOL(cd_pop_val(cd))));
                 break;
-            case OP_NEGATE:
-                cd_push(cd, INT_VAL(-AS_INT(cd_pop_val(cd))));
+            }
+            case OP_NEGATE: {
+                if (!IS_INT(cd_peek(cd, 0))) {
+                    cd_runtime_error(cd, "Operand must be an integer.");
+                    return CD_ERR_RUNTIME;
+                }
+                int64_t a = AS_INT(cd_pop_val(cd));
+                cd_push(cd, INT_VAL((int64_t)(-(uint64_t)a)));
                 break;
+            }
             case OP_PRINT: {
                 value_print(cd_pop_val(cd));
                 printf("\n");
@@ -299,7 +373,12 @@ int cd_vm_run(cd_State* cd) {
             }
             case OP_JUMP_IF_FALSE: {
                 uint16_t offset = READ_SHORT();
-                if (!AS_BOOL(cd_peek(cd, 0))) frame->ip += offset;
+                Value cond = cd_peek(cd, 0);
+                if (!IS_BOOL(cond)) {
+                    cd_runtime_error(cd, "Condition must be a boolean.");
+                    return CD_ERR_RUNTIME;
+                }
+                if (!AS_BOOL(cond)) frame->ip += offset;
                 break;
             }
             case OP_LOOP: {
@@ -323,7 +402,7 @@ int cd_vm_run(cd_State* cd) {
                     return CD_OK;
                 }
                 Value returnVal = result;
-                if (frame->function->name && strcmp(frame->function->name->chars, "init") == 0) {
+                if (frame->function->isInitializer) {
                     returnVal = frame->slots[0];
                 }
                 cd->stackTop = frame->slots;
@@ -361,7 +440,7 @@ int cd_vm_run(cd_State* cd) {
                         cd_runtime_error(cd, "List index must be integer.");
                         return CD_ERR_RUNTIME;
                     }
-                    cd_push(cd, list_get(AS_LIST(target), (int)AS_INT(index)));
+                    cd_push(cd, list_get(AS_LIST(target), AS_INT(index)));
                 } else if (IS_MAP(target)) {
                     Value res = NIL_VAL;
                     map_get(AS_MAP(target), index, &res);
@@ -372,8 +451,8 @@ int cd_vm_run(cd_State* cd) {
                         return CD_ERR_RUNTIME;
                     }
                     ObjString* s = AS_STRING(target);
-                    int idx = (int)AS_INT(index);
-                    if (idx < 0 || idx >= s->length) {
+                    int64_t idx = AS_INT(index);
+                    if (idx < 0 || idx >= (int64_t)s->length) {
                         cd_push(cd, OBJ_VAL(cd_copy_string(cd, "", 0)));
                     } else {
                         char buf[2] = { s->chars[idx], '\0' };
@@ -394,7 +473,7 @@ int cd_vm_run(cd_State* cd) {
                         cd_runtime_error(cd, "List index must be integer.");
                         return CD_ERR_RUNTIME;
                     }
-                    list_set(AS_LIST(target), (int)AS_INT(index), val);
+                    list_set(AS_LIST(target), AS_INT(index), val);
                 } else if (IS_MAP(target)) {
                     map_set(AS_MAP(target), index, val);
                 } else {
@@ -413,7 +492,12 @@ int cd_vm_run(cd_State* cd) {
             case OP_METHOD: {
                 ObjString* name = READ_STRING();
                 Value methodVal = cd_peek(cd, 0);
-                ObjClass* klass = AS_CLASS(cd_peek(cd, 1));
+                Value classVal = cd_peek(cd, 1);
+                if (!IS_CLASS(classVal) || !IS_FUNCTION(methodVal)) {
+                    cd_runtime_error(cd, "Invalid class method definition.");
+                    return CD_ERR_RUNTIME;
+                }
+                ObjClass* klass = AS_CLASS(classVal);
                 table_set(&klass->methods, name, methodVal);
                 cd_pop_val(cd);
                 break;
@@ -428,7 +512,7 @@ int cd_vm_run(cd_State* cd) {
                         cd_push(cd, val);
                         break;
                     }
-                    if (table_get(&instance->klass->methods, prop, &val)) {
+                    if (table_get(&instance->klass->methods, prop, &val) && IS_FUNCTION(val)) {
                         ObjBoundMethod* bound = cd_new_bound_method(cd, target, AS_FUNCTION(val));
                         cd_push(cd, OBJ_VAL(bound));
                         break;
@@ -466,7 +550,7 @@ int cd_vm_run(cd_State* cd) {
                 if (IS_INSTANCE(target)) {
                     ObjInstance* instance = AS_INSTANCE(target);
                     Value methodVal;
-                    if (!table_get(&instance->klass->methods, method, &methodVal)) {
+                    if (!table_get(&instance->klass->methods, method, &methodVal) || !IS_FUNCTION(methodVal)) {
                         cd_runtime_error(cd, "Undefined method '%s'.", method->chars);
                         return CD_ERR_RUNTIME;
                     }
@@ -479,11 +563,19 @@ int cd_vm_run(cd_State* cd) {
                 if (IS_LIST(target)) {
                     ObjList* list = AS_LIST(target);
                     if (strcmp(method->chars, "add") == 0 || strcmp(method->chars, "push") == 0) {
+                        if (argCount != 1) {
+                            cd_runtime_error(cd, "Expected 1 argument but got %d.", argCount);
+                            return CD_ERR_RUNTIME;
+                        }
                         Value arg = cd_peek(cd, 0);
                         list_append(list, arg);
                         cd->stackTop -= (argCount + 1);
                         cd_push(cd, arg);
                     } else if (strcmp(method->chars, "pop") == 0) {
+                        if (argCount != 0) {
+                            cd_runtime_error(cd, "Expected 0 arguments but got %d.", argCount);
+                            return CD_ERR_RUNTIME;
+                        }
                         Value res = list->count > 0 ? list->items[--list->count] : NIL_VAL;
                         cd->stackTop -= (argCount + 1);
                         cd_push(cd, res);
@@ -494,11 +586,19 @@ int cd_vm_run(cd_State* cd) {
                 } else if (IS_MAP(target)) {
                     ObjMap* map = AS_MAP(target);
                     if (strcmp(method->chars, "has") == 0) {
+                        if (argCount != 1) {
+                            cd_runtime_error(cd, "Expected 1 argument but got %d.", argCount);
+                            return CD_ERR_RUNTIME;
+                        }
                         Value key = cd_peek(cd, 0);
                         bool exists = map_get(map, key, NULL);
                         cd->stackTop -= (argCount + 1);
                         cd_push(cd, BOOL_VAL(exists));
                     } else if (strcmp(method->chars, "remove") == 0) {
+                        if (argCount != 1) {
+                            cd_runtime_error(cd, "Expected 1 argument but got %d.", argCount);
+                            return CD_ERR_RUNTIME;
+                        }
                         Value key = cd_peek(cd, 0);
                         bool removed = map_delete(map, key);
                         cd->stackTop -= (argCount + 1);

@@ -269,6 +269,7 @@ ObjFunction* cd_new_function(cd_State* cd) {
     ObjFunction* function = (ObjFunction*)allocate_object(cd, sizeof(ObjFunction), OBJ_FUNCTION);
     function->arity = 0;
     function->returnType = TYPE_VOID;
+    function->isInitializer = false;
     for (int i = 0; i < 16; i++) function->paramTypes[i] = TYPE_VOID;
     function->name = NULL;
     chunk_init(&function->chunk);
@@ -329,13 +330,13 @@ void list_append(ObjList* list, Value value) {
     list->items[list->count++] = value;
 }
 
-Value list_get(ObjList* list, int index) {
-    if (index < 0 || index >= list->count) return NIL_VAL;
+Value list_get(ObjList* list, int64_t index) {
+    if (index < 0 || index >= (int64_t)list->count) return NIL_VAL;
     return list->items[index];
 }
 
-void list_set(ObjList* list, int index, Value value) {
-    if (index >= 0 && index < list->count) {
+void list_set(ObjList* list, int64_t index, Value value) {
+    if (index >= 0 && index < (int64_t)list->count) {
         list->items[index] = value;
     }
 }

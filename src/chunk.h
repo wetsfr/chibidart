@@ -62,6 +62,7 @@ struct ObjFunction {
     int arity;
     int paramTypes[16];
     int returnType;
+    bool isInitializer;
     Chunk chunk;
     ObjString* name;
 };

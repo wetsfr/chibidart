@@ -195,8 +195,8 @@ ObjBoundMethod* cd_new_bound_method(cd_State* cd, Value receiver, ObjFunction* m
 void cd_free_object(Obj* object);
 
 void list_append(ObjList* list, Value value);
-Value list_get(ObjList* list, int index);
-void list_set(ObjList* list, int index, Value value);
+Value list_get(ObjList* list, int64_t index);
+void list_set(ObjList* list, int64_t index, Value value);
 
 bool map_get(ObjMap* map, Value key, Value* out);
 void map_set(ObjMap* map, Value key, Value value);

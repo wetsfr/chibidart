@@ -38,13 +38,21 @@ int cd_dostring(cd_State* cd, const char* source) {
         return CD_ERR_RUNTIME;
     }
 
+    int prevFrameCount = cd->frameCount;
+    Value* prevStackTop = cd->stackTop;
+
     cd_push(cd, OBJ_VAL(function));
     CallFrame* frame = &cd->frames[cd->frameCount++];
     frame->function = function;
     frame->ip = function->chunk.code;
     frame->slots = cd->stackTop - 1;
 
-    return cd_vm_run(cd);
+    int result = cd_vm_run(cd);
+    if (result != CD_OK) {
+        cd->frameCount = prevFrameCount;
+        cd->stackTop = prevStackTop;
+    }
+    return result;
 }
 
 static char* read_file(const char* path) {
@@ -271,16 +279,26 @@ int cd_pcall(cd_State* cd, int nargs, int nresults) {
         return CD_ERR_RUNTIME;
     }
 
+    int prevFrameCount = cd->frameCount;
     CallFrame* frame = &cd->frames[cd->frameCount++];
     frame->function = function;
     frame->ip = function->chunk.code;
     frame->slots = calleeSlot;
 
     int result = cd_vm_run(cd);
-    if (result != CD_OK) return result;
+    if (result != CD_OK) {
+        cd->frameCount = prevFrameCount;
+        cd->stackTop = calleeSlot;
+        return result;
+    }
 
     if (nresults == 0) {
         cd->stackTop = calleeSlot;
+    } else if (nresults > 0) {
+        while (cd->stackTop < calleeSlot + nresults && cd->stackTop < cd->stack + CD_STACK_MAX) {
+            cd_push(cd, NIL_VAL);
+        }
+        cd->stackTop = calleeSlot + nresults;
     }
 
     return CD_OK;

@@ -652,44 +652,72 @@ static DataType parse_precedence(Precedence precedence) {
         switch (op) {
             case TOKEN_PLUS:
                 if (leftType == TYPE_STRING || rightType == TYPE_STRING) {
+                    check_type_match(TYPE_STRING, leftType, "Invalid operands for '+'");
+                    check_type_match(TYPE_STRING, rightType, "Invalid operands for '+'");
                     emit_byte(OP_ADD);
                     leftType = TYPE_STRING;
                 } else if (is_float_type(leftType) || is_float_type(rightType)) {
+                    if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
+                        (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
+                        error("Invalid operands for '+'.");
+                    }
                     emit_byte(OP_FADD);
                     leftType = TYPE_DOUBLE;
                 } else {
+                    check_type_match(TYPE_INT, leftType, "Invalid operands for '+'");
+                    check_type_match(TYPE_INT, rightType, "Invalid operands for '+'");
                     emit_byte(OP_ADD);
                     leftType = TYPE_INT;
                 }
                 break;
             case TOKEN_MINUS:
                 if (is_float_type(leftType) || is_float_type(rightType)) {
+                    if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
+                        (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
+                        error("Invalid operands for '-'.");
+                    }
                     emit_byte(OP_FSUB);
                     leftType = TYPE_DOUBLE;
                 } else {
+                    check_type_match(TYPE_INT, leftType, "Invalid operands for '-'");
+                    check_type_match(TYPE_INT, rightType, "Invalid operands for '-'");
                     emit_byte(OP_SUB);
                     leftType = TYPE_INT;
                 }
                 break;
             case TOKEN_STAR:
                 if (is_float_type(leftType) || is_float_type(rightType)) {
+                    if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
+                        (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
+                        error("Invalid operands for '*'.");
+                    }
                     emit_byte(OP_FMUL);
                     leftType = TYPE_DOUBLE;
                 } else {
+                    check_type_match(TYPE_INT, leftType, "Invalid operands for '*'");
+                    check_type_match(TYPE_INT, rightType, "Invalid operands for '*'");
                     emit_byte(OP_MUL);
                     leftType = TYPE_INT;
                 }
                 break;
             case TOKEN_SLASH:
                 if (is_float_type(leftType) || is_float_type(rightType)) {
+                    if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
+                        (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
+                        error("Invalid operands for '/'.");
+                    }
                     emit_byte(OP_FDIV);
                     leftType = TYPE_DOUBLE;
                 } else {
+                    check_type_match(TYPE_INT, leftType, "Invalid operands for '/'");
+                    check_type_match(TYPE_INT, rightType, "Invalid operands for '/'");
                     emit_byte(OP_DIV);
                     leftType = TYPE_INT;
                 }
                 break;
             case TOKEN_PERCENT:
+                check_type_match(TYPE_INT, leftType, "Operands of '%' must be int");
+                check_type_match(TYPE_INT, rightType, "Operands of '%' must be int");
                 emit_byte(OP_MOD);
                 leftType = TYPE_INT;
                 break;
@@ -703,32 +731,56 @@ static DataType parse_precedence(Precedence precedence) {
                 break;
             case TOKEN_GREATER:
                 if (is_float_type(leftType) || is_float_type(rightType)) {
+                    if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
+                        (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
+                        error("Invalid operands for '>'.");
+                    }
                     emit_byte(OP_FGREATER);
                 } else {
+                    check_type_match(TYPE_INT, leftType, "Invalid operands for '>'");
+                    check_type_match(TYPE_INT, rightType, "Invalid operands for '>'");
                     emit_byte(OP_GREATER);
                 }
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_GREATER_EQUAL:
                 if (is_float_type(leftType) || is_float_type(rightType)) {
+                    if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
+                        (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
+                        error("Invalid operands for '>='.");
+                    }
                     emit_bytes(OP_FLESS, OP_NOT);
                 } else {
+                    check_type_match(TYPE_INT, leftType, "Invalid operands for '>='");
+                    check_type_match(TYPE_INT, rightType, "Invalid operands for '>='");
                     emit_bytes(OP_LESS, OP_NOT);
                 }
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_LESS:
                 if (is_float_type(leftType) || is_float_type(rightType)) {
+                    if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
+                        (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
+                        error("Invalid operands for '<'.");
+                    }
                     emit_byte(OP_FLESS);
                 } else {
+                    check_type_match(TYPE_INT, leftType, "Invalid operands for '<'");
+                    check_type_match(TYPE_INT, rightType, "Invalid operands for '<'");
                     emit_byte(OP_LESS);
                 }
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_LESS_EQUAL:
                 if (is_float_type(leftType) || is_float_type(rightType)) {
+                    if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
+                        (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
+                        error("Invalid operands for '<='.");
+                    }
                     emit_bytes(OP_FGREATER, OP_NOT);
                 } else {
+                    check_type_match(TYPE_INT, leftType, "Invalid operands for '<='");
+                    check_type_match(TYPE_INT, rightType, "Invalid operands for '<='");
                     emit_bytes(OP_GREATER, OP_NOT);
                 }
                 leftType = TYPE_BOOL;
@@ -1000,6 +1052,9 @@ static void class_declaration(void) {
             current->locals[0].name.length = 4;
             current->locals[0].type = TYPE_CLASS;
             compiler.function->name = cd_copy_string(currentVm, memberName.start, memberName.length);
+            if (memberName.length == 4 && memcmp(memberName.start, "init", 4) == 0) {
+                compiler.function->isInitializer = true;
+            }
 
             begin_scope();
             consume(TOKEN_LEFT_PAREN, "Expect '(' after method name.");
