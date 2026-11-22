@@ -76,6 +76,7 @@ typedef enum {
 
 struct Obj {
     ObjType type;
+    bool isMarked;
     struct Obj* next;
 };
 
@@ -100,14 +101,22 @@ struct ObjList {
     Value* items;
 };
 
+typedef enum {
+    MAP_EMPTY,
+    MAP_OCCUPIED,
+    MAP_TOMBSTONE
+} MapEntryState;
+
 typedef struct {
     Value key;
     Value value;
+    uint8_t state;
 } MapPair;
 
 struct ObjMap {
     Obj obj;
     int count;
+    int used;
     int capacity;
     MapPair* entries;
 };
@@ -133,6 +142,7 @@ struct ObjClass {
     Obj obj;
     ObjString* name;
     Table methods;
+    Table defaults;
 };
 
 struct ObjInstance {
@@ -181,6 +191,8 @@ void table_free(Table* table);
 bool table_get(Table* table, ObjString* key, Value* value);
 bool table_set(Table* table, ObjString* key, Value value);
 bool table_delete(Table* table, ObjString* key);
+void table_add_all(Table* from, Table* to);
+void table_remove_white(Table* table);
 ObjString* table_find_string(Table* table, const char* chars, int length, uint32_t hash);
 
 ObjString* cd_copy_string(cd_State* cd, const char* chars, int length);
@@ -192,7 +204,7 @@ ObjMap* cd_new_map(cd_State* cd);
 ObjClass* cd_new_class(cd_State* cd, ObjString* name);
 ObjInstance* cd_new_instance(cd_State* cd, ObjClass* klass);
 ObjBoundMethod* cd_new_bound_method(cd_State* cd, Value receiver, ObjFunction* method);
-void cd_free_object(Obj* object);
+void cd_free_object(cd_State* cd, Obj* object);
 
 void list_append(ObjList* list, Value value);
 Value list_get(ObjList* list, int64_t index);
@@ -201,5 +213,9 @@ void list_set(ObjList* list, int64_t index, Value value);
 bool map_get(ObjMap* map, Value key, Value* out);
 void map_set(ObjMap* map, Value key, Value value);
 bool map_delete(ObjMap* map, Value key);
+
+void cd_mark_object(cd_State* cd, Obj* object);
+void cd_mark_value(cd_State* cd, Value value);
+void cd_collect_garbage(cd_State* cd);
 
 #endif

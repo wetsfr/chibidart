@@ -34,37 +34,33 @@ typedef enum {
     TYPE_METHOD
 } FunctionType;
 
-typedef struct {
-    Token name;
-    DataType type;
-    int arity;
-    DataType paramTypes[16];
-    DataType returnType;
-} GlobalSymbol;
-
-typedef struct Compiler {
+struct Compiler {
     struct Compiler* enclosing;
     ObjFunction* function;
     FunctionType type;
     Local locals[256];
     int localCount;
     int scopeDepth;
-} Compiler;
+};
 
 typedef struct {
-    GlobalSymbol symbols[256];
-    int count;
-} GlobalTable;
+    Parser parser;
+    Lexer lexer;
+    cd_State* vm;
+    Compiler* current;
+} CompilerState;
 
-static Parser parser;
-static Lexer lexer;
-static cd_State* currentVm;
-static Compiler* current = NULL;
-static GlobalTable globals;
+void cd_mark_compiler_roots(cd_State* cd) {
+    Compiler* compiler = cd->currentCompiler;
+    while (compiler != NULL) {
+        cd_mark_object(cd, (Obj*)compiler->function);
+        compiler = compiler->enclosing;
+    }
+}
 
-static void error_at(Token* token, const char* message) {
-    if (parser.panicMode) return;
-    parser.panicMode = true;
+static void error_at(CompilerState* cs, Token* token, const char* message) {
+    if (cs->parser.panicMode) return;
+    cs->parser.panicMode = true;
     fprintf(stderr, "[line %d] Error", token->line);
 
     if (token->type == TOKEN_EOF) {
@@ -74,133 +70,135 @@ static void error_at(Token* token, const char* message) {
     }
 
     fprintf(stderr, ": %s\n", message);
-    parser.hadError = true;
+    cs->parser.hadError = true;
 }
 
-static void error(const char* message) {
-    error_at(&parser.previous, message);
+static void error(CompilerState* cs, const char* message) {
+    error_at(cs, &cs->parser.previous, message);
 }
 
-static void error_at_current(const char* message) {
-    error_at(&parser.current, message);
+static void error_at_current(CompilerState* cs, const char* message) {
+    error_at(cs, &cs->parser.current, message);
 }
 
-static void advance(void) {
-    parser.previous = parser.current;
+static void advance(CompilerState* cs) {
+    cs->parser.previous = cs->parser.current;
     for (;;) {
-        parser.current = lexer_next(&lexer);
-        if (parser.current.type != TOKEN_ERROR) break;
-        error_at_current(parser.current.start);
+        cs->parser.current = lexer_next(&cs->lexer);
+        if (cs->parser.current.type != TOKEN_ERROR) break;
+        error_at_current(cs, cs->parser.current.start);
     }
 }
 
-static void consume(TokenType type, const char* message) {
-    if (parser.current.type == type) {
-        advance();
+static void consume(CompilerState* cs, TokenType type, const char* message) {
+    if (cs->parser.current.type == type) {
+        advance(cs);
         return;
     }
-    error_at_current(message);
+    error_at_current(cs, message);
 }
 
-static bool check(TokenType type) {
-    return parser.current.type == type;
+static bool check(CompilerState* cs, TokenType type) {
+    return cs->parser.current.type == type;
 }
 
-static bool match(TokenType type) {
-    if (!check(type)) return false;
-    advance();
+static bool match(CompilerState* cs, TokenType type) {
+    if (!check(cs, type)) return false;
+    advance(cs);
     return true;
 }
 
-static Chunk* current_chunk(void) {
-    return &current->function->chunk;
+static Chunk* current_chunk(CompilerState* cs) {
+    return &cs->current->function->chunk;
 }
 
-static void emit_byte(uint8_t byte) {
-    chunk_write(current_chunk(), byte, parser.previous.line);
+static void emit_byte(CompilerState* cs, uint8_t byte) {
+    chunk_write(current_chunk(cs), byte, cs->parser.previous.line);
 }
 
-static void emit_bytes(uint8_t byte1, uint8_t byte2) {
-    emit_byte(byte1);
-    emit_byte(byte2);
+static void emit_bytes(CompilerState* cs, uint8_t byte1, uint8_t byte2) {
+    emit_byte(cs, byte1);
+    emit_byte(cs, byte2);
 }
 
-static void emit_loop(int loopStart) {
-    emit_byte(OP_LOOP);
-    int offset = current_chunk()->count - loopStart + 2;
-    if (offset > 65535) error("Loop body too large.");
-    emit_byte((offset >> 8) & 0xff);
-    emit_byte(offset & 0xff);
+static void emit_loop(CompilerState* cs, int loopStart) {
+    emit_byte(cs, OP_LOOP);
+    int offset = current_chunk(cs)->count - loopStart + 2;
+    if (offset > 65535) error(cs, "Loop body too large.");
+    emit_byte(cs, (offset >> 8) & 0xff);
+    emit_byte(cs, offset & 0xff);
 }
 
-static int emit_jump(uint8_t instruction) {
-    emit_byte(instruction);
-    emit_byte(0xff);
-    emit_byte(0xff);
-    return current_chunk()->count - 2;
+static int emit_jump(CompilerState* cs, uint8_t instruction) {
+    emit_byte(cs, instruction);
+    emit_byte(cs, 0xff);
+    emit_byte(cs, 0xff);
+    return current_chunk(cs)->count - 2;
 }
 
-static void patch_jump(int offset) {
-    int jump = current_chunk()->count - offset - 2;
+static void patch_jump(CompilerState* cs, int offset) {
+    int jump = current_chunk(cs)->count - offset - 2;
     if (jump > 65535) {
-        error("Too much code to jump over.");
+        error(cs, "Too much code to jump over.");
     }
-    current_chunk()->code[offset] = (jump >> 8) & 0xff;
-    current_chunk()->code[offset + 1] = jump & 0xff;
+    current_chunk(cs)->code[offset] = (jump >> 8) & 0xff;
+    current_chunk(cs)->code[offset + 1] = jump & 0xff;
 }
 
-static void emit_return(void) {
-    emit_byte(OP_NIL);
-    emit_byte(OP_RETURN);
+static void emit_return(CompilerState* cs) {
+    emit_byte(cs, OP_NIL);
+    emit_byte(cs, OP_RETURN);
 }
 
-static uint8_t make_constant(Value value) {
-    int constant = chunk_add_constant(current_chunk(), value);
+static uint8_t make_constant(CompilerState* cs, Value value) {
+    int constant = chunk_add_constant(current_chunk(cs), value);
     if (constant > 255) {
-        error("Too many constants in one chunk.");
+        error(cs, "Too many constants in one chunk.");
         return 0;
     }
     return (uint8_t)constant;
 }
 
-static void emit_constant(Value value) {
-    emit_bytes(OP_CONSTANT, make_constant(value));
+static void emit_constant(CompilerState* cs, Value value) {
+    emit_bytes(cs, OP_CONSTANT, make_constant(cs, value));
 }
 
-static void init_compiler(Compiler* compiler, FunctionType type, DataType retType) {
-    compiler->enclosing = current;
+static void init_compiler(CompilerState* cs, Compiler* compiler, FunctionType type, DataType retType) {
+    compiler->enclosing = cs->current;
     compiler->function = NULL;
     compiler->type = type;
     compiler->localCount = 0;
     compiler->scopeDepth = 0;
-    compiler->function = cd_new_function(currentVm);
+    cs->current = compiler;
+    cs->vm->currentCompiler = compiler;
+    compiler->function = cd_new_function(cs->vm);
     compiler->function->returnType = retType;
-    current = compiler;
 
-    Local* local = &current->locals[current->localCount++];
+    Local* local = &cs->current->locals[cs->current->localCount++];
     local->depth = 0;
     local->name.start = "";
     local->name.length = 0;
     local->type = TYPE_VOID;
 }
 
-static ObjFunction* end_compiler(void) {
-    emit_return();
-    ObjFunction* function = current->function;
-    current = current->enclosing;
+static ObjFunction* end_compiler(CompilerState* cs) {
+    emit_return(cs);
+    ObjFunction* function = cs->current->function;
+    cs->current = cs->current->enclosing;
+    cs->vm->currentCompiler = cs->current;
     return function;
 }
 
-static void begin_scope(void) {
-    current->scopeDepth++;
+static void begin_scope(CompilerState* cs) {
+    cs->current->scopeDepth++;
 }
 
-static void end_scope(void) {
-    current->scopeDepth--;
-    while (current->localCount > 0 &&
-           current->locals[current->localCount - 1].depth > current->scopeDepth) {
-        emit_byte(OP_POP);
-        current->localCount--;
+static void end_scope(CompilerState* cs) {
+    cs->current->scopeDepth--;
+    while (cs->current->localCount > 0 &&
+           cs->current->locals[cs->current->localCount - 1].depth > cs->current->scopeDepth) {
+        emit_byte(cs, OP_POP);
+        cs->current->localCount--;
     }
 }
 
@@ -209,12 +207,12 @@ static bool identifiers_equal(Token* a, Token* b) {
     return memcmp(a->start, b->start, a->length) == 0;
 }
 
-static int resolve_local(Compiler* compiler, Token* name) {
+static int resolve_local(CompilerState* cs, Compiler* compiler, Token* name) {
     for (int i = compiler->localCount - 1; i >= 0; i--) {
         Local* local = &compiler->locals[i];
         if (identifiers_equal(name, &local->name)) {
             if (local->depth == -1) {
-                error("Can't read local variable in its own initializer.");
+                error(cs, "Can't read local variable in its own initializer.");
             }
             return i;
         }
@@ -222,40 +220,45 @@ static int resolve_local(Compiler* compiler, Token* name) {
     return -1;
 }
 
-static void add_local(Token name, DataType type) {
-    if (current->localCount == 256) {
-        error("Too many local variables in function.");
+static void add_local(CompilerState* cs, Token name, DataType type) {
+    if (cs->current->localCount == 256) {
+        error(cs, "Too many local variables in function.");
         return;
     }
-    Local* local = &current->locals[current->localCount++];
+    Local* local = &cs->current->locals[cs->current->localCount++];
     local->name = name;
     local->depth = -1;
     local->type = type;
 }
 
-static uint8_t identifier_constant(Token* name) {
-    return make_constant(OBJ_VAL(cd_copy_string(currentVm, name->start, name->length)));
+static uint8_t identifier_constant(CompilerState* cs, Token* name) {
+    return make_constant(cs, OBJ_VAL(cd_copy_string(cs->vm, name->start, name->length)));
 }
 
-static GlobalSymbol* find_global_symbol(Token* name) {
-    for (int i = 0; i < globals.count; i++) {
-        if (identifiers_equal(name, &globals.symbols[i].name)) {
-            return &globals.symbols[i];
+static GlobalSymbol* find_global_symbol(CompilerState* cs, Token* name) {
+    cd_State* vm = cs->vm;
+    for (int i = 0; i < vm->globalSymbolCount; i++) {
+        ObjString* symName = vm->globalSymbols[i].name;
+        if (symName->length == name->length &&
+            memcmp(symName->chars, name->start, name->length) == 0) {
+            return &vm->globalSymbols[i];
         }
     }
     return NULL;
 }
 
-static void add_global_symbol(Token name, DataType type, int arity, DataType* params, DataType ret) {
-    GlobalSymbol* sym = find_global_symbol(&name);
+static void add_global_symbol(CompilerState* cs, Token name, DataType type, int arity, DataType* params, DataType ret) {
+    cd_State* vm = cs->vm;
+    GlobalSymbol* sym = find_global_symbol(cs, &name);
     if (sym == NULL) {
-        if (globals.count >= 256) {
-            error("Too many global symbols.");
-            return;
+        if (vm->globalSymbolCount >= vm->globalSymbolCapacity) {
+            int oldCap = vm->globalSymbolCapacity;
+            vm->globalSymbolCapacity = CD_GROW_CAPACITY(oldCap);
+            vm->globalSymbols = CD_GROW_ARRAY(GlobalSymbol, vm->globalSymbols, oldCap, vm->globalSymbolCapacity);
         }
-        sym = &globals.symbols[globals.count++];
+        sym = &vm->globalSymbols[vm->globalSymbolCount++];
+        sym->name = cd_copy_string(vm, name.start, name.length);
     }
-    sym->name = name;
     sym->type = type;
     sym->arity = arity;
     sym->returnType = ret;
@@ -264,12 +267,12 @@ static void add_global_symbol(Token name, DataType type, int arity, DataType* pa
     }
 }
 
-static DataType expression(void);
-static void statement(void);
-static void declaration(void);
-static DataType parse_precedence(Precedence precedence);
+static DataType expression(CompilerState* cs);
+static void statement(CompilerState* cs);
+static void declaration(CompilerState* cs);
+static DataType parse_precedence(CompilerState* cs, Precedence precedence);
 
-static DataType type_from_token(TokenType type) {
+static DataType type_from_token(CompilerState* cs, TokenType type) {
     switch (type) {
         case TOKEN_KW_INT: return TYPE_INT;
         case TOKEN_KW_FLOAT: return TYPE_FLOAT;
@@ -278,16 +281,16 @@ static DataType type_from_token(TokenType type) {
         case TOKEN_KW_STRING: return TYPE_STRING;
         case TOKEN_KW_VOID: return TYPE_VOID;
         case TOKEN_KW_LIST: {
-            if (match(TOKEN_LESS)) {
-                while (!check(TOKEN_GREATER) && !check(TOKEN_EOF)) advance();
-                consume(TOKEN_GREATER, "Expect '>' after type argument.");
+            if (match(cs, TOKEN_LESS)) {
+                while (!check(cs, TOKEN_GREATER) && !check(cs, TOKEN_EOF)) advance(cs);
+                consume(cs, TOKEN_GREATER, "Expect '>' after type argument.");
             }
             return TYPE_LIST;
         }
         case TOKEN_KW_MAP: {
-            if (match(TOKEN_LESS)) {
-                while (!check(TOKEN_GREATER) && !check(TOKEN_EOF)) advance();
-                consume(TOKEN_GREATER, "Expect '>' after type arguments.");
+            if (match(cs, TOKEN_LESS)) {
+                while (!check(cs, TOKEN_GREATER) && !check(cs, TOKEN_EOF)) advance(cs);
+                consume(cs, TOKEN_GREATER, "Expect '>' after type arguments.");
             }
             return TYPE_MAP;
         }
@@ -323,94 +326,94 @@ static bool types_compatible(DataType a, DataType b) {
     return false;
 }
 
-static void check_type_match(DataType expected, DataType actual, const char* msg) {
+static void check_type_match(CompilerState* cs, DataType expected, DataType actual, const char* msg) {
     if (!types_compatible(expected, actual)) {
         char buffer[128];
         snprintf(buffer, sizeof(buffer), "%s (expected %s, got %s)", msg, type_name(expected), type_name(actual));
-        error(buffer);
+        error(cs, buffer);
     }
 }
 
-static DataType parse_variable(Token name, bool canAssign) {
-    int arg = resolve_local(current, &name);
+static DataType parse_variable(CompilerState* cs, Token name, bool canAssign) {
+    int arg = resolve_local(cs, cs->current, &name);
     DataType varType = TYPE_ANY;
     uint8_t getOp, setOp;
 
     if (arg != -1) {
         getOp = OP_GET_LOCAL;
         setOp = OP_SET_LOCAL;
-        varType = current->locals[arg].type;
+        varType = cs->current->locals[arg].type;
     } else {
-        arg = identifier_constant(&name);
+        arg = identifier_constant(cs, &name);
         getOp = OP_GET_GLOBAL;
         setOp = OP_SET_GLOBAL;
-        GlobalSymbol* sym = find_global_symbol(&name);
+        GlobalSymbol* sym = find_global_symbol(cs, &name);
         if (sym != NULL) varType = sym->type;
     }
 
-    if (canAssign && match(TOKEN_EQUAL)) {
-        DataType valType = expression();
-        check_type_match(varType, valType, "Type mismatch in assignment");
-        emit_bytes(setOp, (uint8_t)arg);
+    if (canAssign && match(cs, TOKEN_EQUAL)) {
+        DataType valType = expression(cs);
+        check_type_match(cs, varType, valType, "Type mismatch in assignment");
+        emit_bytes(cs, setOp, (uint8_t)arg);
         return valType;
-    } else if (canAssign && match(TOKEN_PLUS_EQUAL)) {
-        emit_bytes(getOp, (uint8_t)arg);
-        DataType valType = expression();
-        if (varType == TYPE_INT && valType == TYPE_INT) {
-            emit_byte(OP_ADD);
-        } else if (is_float_type(varType) && is_float_type(valType)) {
-            emit_byte(OP_FADD);
-        } else if (varType == TYPE_STRING && valType == TYPE_STRING) {
-            emit_byte(OP_ADD);
+    } else if (canAssign && match(cs, TOKEN_PLUS_EQUAL)) {
+        emit_bytes(cs, getOp, (uint8_t)arg);
+        DataType valType = expression(cs);
+        if (varType == TYPE_INT && (valType == TYPE_INT || valType == TYPE_ANY)) {
+            emit_byte(cs, OP_ADD);
+        } else if (is_float_type(varType) && (is_float_type(valType) || valType == TYPE_INT || valType == TYPE_ANY)) {
+            emit_byte(cs, OP_FADD);
+        } else if (varType == TYPE_STRING && (valType == TYPE_STRING || valType == TYPE_ANY)) {
+            emit_byte(cs, OP_ADD);
         } else {
-            error("Invalid operands for '+='.");
+            error(cs, "Invalid operands for '+='.");
         }
-        emit_bytes(setOp, (uint8_t)arg);
+        emit_bytes(cs, setOp, (uint8_t)arg);
         return varType;
-    } else if (canAssign && match(TOKEN_MINUS_EQUAL)) {
-        emit_bytes(getOp, (uint8_t)arg);
-        DataType valType = expression();
-        if (varType == TYPE_INT && valType == TYPE_INT) {
-            emit_byte(OP_SUB);
-        } else if (is_float_type(varType) && is_float_type(valType)) {
-            emit_byte(OP_FSUB);
+    } else if (canAssign && match(cs, TOKEN_MINUS_EQUAL)) {
+        emit_bytes(cs, getOp, (uint8_t)arg);
+        DataType valType = expression(cs);
+        if (varType == TYPE_INT && (valType == TYPE_INT || valType == TYPE_ANY)) {
+            emit_byte(cs, OP_SUB);
+        } else if (is_float_type(varType) && (is_float_type(valType) || valType == TYPE_INT || valType == TYPE_ANY)) {
+            emit_byte(cs, OP_FSUB);
         } else {
-            error("Invalid operands for '-='.");
+            error(cs, "Invalid operands for '-='.");
         }
-        emit_bytes(setOp, (uint8_t)arg);
+        emit_bytes(cs, setOp, (uint8_t)arg);
         return varType;
     }
 
-    emit_bytes(getOp, (uint8_t)arg);
+    emit_bytes(cs, getOp, (uint8_t)arg);
     return varType;
 }
 
-static DataType call_expr(Token calleeName) {
+static DataType call_expr(CompilerState* cs, Token calleeName) {
     int argCount = 0;
     DataType argTypes[16];
 
-    if (!check(TOKEN_RIGHT_PAREN)) {
+    if (!check(cs, TOKEN_RIGHT_PAREN)) {
         do {
             if (argCount == 16) {
-                error("Can't have more than 16 arguments.");
-                expression();
+                error(cs, "Can't have more than 16 arguments.");
+                expression(cs);
             } else {
-                argTypes[argCount++] = expression();
+                argTypes[argCount++] = expression(cs);
             }
-        } while (match(TOKEN_COMMA));
+        } while (match(cs, TOKEN_COMMA));
     }
-    consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
+    consume(cs, TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
 
-    GlobalSymbol* sym = find_global_symbol(&calleeName);
+    GlobalSymbol* sym = find_global_symbol(cs, &calleeName);
     DataType retType = TYPE_ANY;
 
     if (sym != NULL) {
         if (sym->type != TYPE_CLASS && sym->arity != argCount) {
-            error("Incorrect argument count for function.");
+            error(cs, "Incorrect argument count for function.");
         }
         if (sym->type != TYPE_CLASS) {
             for (int i = 0; i < argCount; i++) {
-                check_type_match(sym->paramTypes[i], argTypes[i], "Argument type mismatch");
+                check_type_match(cs, sym->paramTypes[i], argTypes[i], "Argument type mismatch");
             }
             retType = sym->returnType;
         } else {
@@ -418,43 +421,43 @@ static DataType call_expr(Token calleeName) {
         }
     }
 
-    emit_bytes(OP_CALL, (uint8_t)argCount);
+    emit_bytes(cs, OP_CALL, (uint8_t)argCount);
     return retType;
 }
 
-static DataType primary(bool canAssign) {
-    if (match(TOKEN_KW_TRUE)) {
-        emit_byte(OP_TRUE);
+static DataType primary(CompilerState* cs, bool canAssign) {
+    if (match(cs, TOKEN_KW_TRUE)) {
+        emit_byte(cs, OP_TRUE);
         return TYPE_BOOL;
     }
-    if (match(TOKEN_KW_FALSE)) {
-        emit_byte(OP_FALSE);
+    if (match(cs, TOKEN_KW_FALSE)) {
+        emit_byte(cs, OP_FALSE);
         return TYPE_BOOL;
     }
-    if (match(TOKEN_KW_NULL)) {
-        emit_byte(OP_NIL);
+    if (match(cs, TOKEN_KW_NULL)) {
+        emit_byte(cs, OP_NIL);
         return TYPE_ANY;
     }
-    if (match(TOKEN_KW_THIS)) {
+    if (match(cs, TOKEN_KW_THIS)) {
         Token thisToken;
         thisToken.start = "this";
         thisToken.length = 4;
-        thisToken.line = parser.previous.line;
-        return parse_variable(thisToken, false);
+        thisToken.line = cs->parser.previous.line;
+        return parse_variable(cs, thisToken, false);
     }
-    if (match(TOKEN_INT)) {
-        int64_t value = strtoll(parser.previous.start, NULL, 10);
-        emit_constant(INT_VAL(value));
+    if (match(cs, TOKEN_INT)) {
+        int64_t value = strtoll(cs->parser.previous.start, NULL, 10);
+        emit_constant(cs, INT_VAL(value));
         return TYPE_INT;
     }
-    if (match(TOKEN_FLOAT)) {
-        double value = strtod(parser.previous.start, NULL);
-        emit_constant(FLOAT_VAL(value));
+    if (match(cs, TOKEN_FLOAT)) {
+        double value = strtod(cs->parser.previous.start, NULL);
+        emit_constant(cs, FLOAT_VAL(value));
         return TYPE_DOUBLE;
     }
-    if (match(TOKEN_STRING)) {
-        const char* s = parser.previous.start + 1;
-        int len = parser.previous.length - 2;
+    if (match(cs, TOKEN_STRING)) {
+        const char* s = cs->parser.previous.start + 1;
+        int len = cs->parser.previous.length - 2;
         char* buf = CD_ALLOC(char, len + 1);
         int j = 0;
         for (int i = 0; i < len; i++) {
@@ -470,79 +473,82 @@ static DataType primary(bool canAssign) {
             }
         }
         buf[j] = '\0';
-        ObjString* str = cd_take_string(currentVm, buf, j);
-        emit_constant(OBJ_VAL(str));
+        if (j < len) {
+            buf = CD_GROW_ARRAY(char, buf, len + 1, j + 1);
+        }
+        ObjString* str = cd_take_string(cs->vm, buf, j);
+        emit_constant(cs, OBJ_VAL(str));
         return TYPE_STRING;
     }
-    if (match(TOKEN_LEFT_BRACKET)) {
+    if (match(cs, TOKEN_LEFT_BRACKET)) {
         int count = 0;
-        if (!check(TOKEN_RIGHT_BRACKET)) {
+        if (!check(cs, TOKEN_RIGHT_BRACKET)) {
             do {
-                expression();
+                expression(cs);
                 if (count == 255) {
-                    error("Too many elements in list literal.");
+                    error(cs, "Too many elements in list literal.");
                 } else {
                     count++;
                 }
-            } while (match(TOKEN_COMMA));
+            } while (match(cs, TOKEN_COMMA));
         }
-        consume(TOKEN_RIGHT_BRACKET, "Expect ']' after list elements.");
-        emit_bytes(OP_BUILD_LIST, (uint8_t)count);
+        consume(cs, TOKEN_RIGHT_BRACKET, "Expect ']' after list elements.");
+        emit_bytes(cs, OP_BUILD_LIST, (uint8_t)count);
         return TYPE_LIST;
     }
-    if (match(TOKEN_LEFT_BRACE)) {
+    if (match(cs, TOKEN_LEFT_BRACE)) {
         int count = 0;
-        if (!check(TOKEN_RIGHT_BRACE)) {
+        if (!check(cs, TOKEN_RIGHT_BRACE)) {
             do {
-                expression();
-                consume(TOKEN_COLON, "Expect ':' after map key.");
-                expression();
+                expression(cs);
+                consume(cs, TOKEN_COLON, "Expect ':' after map key.");
+                expression(cs);
                 if (count == 255) {
-                    error("Too many entries in map literal.");
+                    error(cs, "Too many entries in map literal.");
                 } else {
                     count++;
                 }
-            } while (match(TOKEN_COMMA));
+            } while (match(cs, TOKEN_COMMA));
         }
-        consume(TOKEN_RIGHT_BRACE, "Expect '}' after map entries.");
-        emit_bytes(OP_BUILD_MAP, (uint8_t)count);
+        consume(cs, TOKEN_RIGHT_BRACE, "Expect '}' after map entries.");
+        emit_bytes(cs, OP_BUILD_MAP, (uint8_t)count);
         return TYPE_MAP;
     }
-    if (match(TOKEN_LEFT_PAREN)) {
-        DataType type = expression();
-        consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression.");
+    if (match(cs, TOKEN_LEFT_PAREN)) {
+        DataType type = expression(cs);
+        consume(cs, TOKEN_RIGHT_PAREN, "Expect ')' after expression.");
         return type;
     }
-    if (match(TOKEN_MINUS)) {
-        DataType type = parse_precedence(PREC_UNARY);
+    if (match(cs, TOKEN_MINUS)) {
+        DataType type = parse_precedence(cs, PREC_UNARY);
         if (type == TYPE_INT) {
-            emit_byte(OP_NEGATE);
+            emit_byte(cs, OP_NEGATE);
             return TYPE_INT;
         } else if (is_float_type(type)) {
-            emit_byte(OP_FNEGATE);
+            emit_byte(cs, OP_FNEGATE);
             return type;
         }
-        error("Operand of '-' must be int, float or double.");
+        error(cs, "Operand of '-' must be int, float or double.");
         return TYPE_ANY;
     }
-    if (match(TOKEN_BANG)) {
-        DataType type = parse_precedence(PREC_UNARY);
-        check_type_match(TYPE_BOOL, type, "Operand of '!' must be bool");
-        emit_byte(OP_NOT);
+    if (match(cs, TOKEN_BANG)) {
+        DataType type = parse_precedence(cs, PREC_UNARY);
+        check_type_match(cs, TYPE_BOOL, type, "Operand of '!' must be bool");
+        emit_byte(cs, OP_NOT);
         return TYPE_BOOL;
     }
-    if (match(TOKEN_IDENTIFIER)) {
-        Token name = parser.previous;
-        if (match(TOKEN_LEFT_PAREN)) {
-            uint8_t arg = identifier_constant(&name);
-            emit_bytes(OP_GET_GLOBAL, arg);
-            return call_expr(name);
+    if (match(cs, TOKEN_IDENTIFIER)) {
+        Token name = cs->parser.previous;
+        if (match(cs, TOKEN_LEFT_PAREN)) {
+            uint8_t arg = identifier_constant(cs, &name);
+            emit_bytes(cs, OP_GET_GLOBAL, arg);
+            return call_expr(cs, name);
         }
-        return parse_variable(name, canAssign);
+        return parse_variable(cs, name, canAssign);
     }
 
-    error("Expect expression.");
-    advance();
+    error(cs, "Expect expression.");
+    advance(cs);
     return TYPE_ANY;
 }
 
@@ -565,108 +571,108 @@ static Precedence get_precedence(TokenType type) {
     }
 }
 
-static DataType parse_precedence(Precedence precedence) {
+static DataType parse_precedence(CompilerState* cs, Precedence precedence) {
     bool canAssign = precedence <= PREC_ASSIGNMENT;
-    DataType leftType = primary(canAssign);
+    DataType leftType = primary(cs, canAssign);
 
     for (;;) {
-        if (match(TOKEN_LEFT_BRACKET)) {
-            expression();
-            consume(TOKEN_RIGHT_BRACKET, "Expect ']' after index.");
-            if (canAssign && match(TOKEN_EQUAL)) {
-                DataType valType = expression();
-                emit_byte(OP_SET_INDEX);
+        if (match(cs, TOKEN_LEFT_BRACKET)) {
+            expression(cs);
+            consume(cs, TOKEN_RIGHT_BRACKET, "Expect ']' after index.");
+            if (canAssign && match(cs, TOKEN_EQUAL)) {
+                DataType valType = expression(cs);
+                emit_byte(cs, OP_SET_INDEX);
                 leftType = valType;
             } else {
-                emit_byte(OP_GET_INDEX);
+                emit_byte(cs, OP_GET_INDEX);
                 leftType = TYPE_ANY;
             }
             continue;
         }
 
-        if (match(TOKEN_DOT)) {
-            consume(TOKEN_IDENTIFIER, "Expect property or method name.");
-            Token prop = parser.previous;
-            uint8_t nameConst = identifier_constant(&prop);
+        if (match(cs, TOKEN_DOT)) {
+            consume(cs, TOKEN_IDENTIFIER, "Expect property or method name.");
+            Token prop = cs->parser.previous;
+            uint8_t nameConst = identifier_constant(cs, &prop);
 
-            if (canAssign && match(TOKEN_EQUAL)) {
-                DataType valType = expression();
-                emit_bytes(OP_SET_PROP, nameConst);
+            if (canAssign && match(cs, TOKEN_EQUAL)) {
+                DataType valType = expression(cs);
+                emit_bytes(cs, OP_SET_PROP, nameConst);
                 leftType = valType;
-            } else if (match(TOKEN_LEFT_PAREN)) {
+            } else if (match(cs, TOKEN_LEFT_PAREN)) {
                 int argCount = 0;
-                if (!check(TOKEN_RIGHT_PAREN)) {
+                if (!check(cs, TOKEN_RIGHT_PAREN)) {
                     do {
-                        expression();
+                        expression(cs);
                         if (argCount == 255) {
-                            error("Can't have more than 255 arguments.");
+                            error(cs, "Can't have more than 255 arguments.");
                         } else {
                             argCount++;
                         }
-                    } while (match(TOKEN_COMMA));
+                    } while (match(cs, TOKEN_COMMA));
                 }
-                consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
-                emit_byte(OP_INVOKE_PROP);
-                emit_byte(nameConst);
-                emit_byte((uint8_t)argCount);
+                consume(cs, TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
+                emit_byte(cs, OP_INVOKE_PROP);
+                emit_byte(cs, nameConst);
+                emit_byte(cs, (uint8_t)argCount);
                 leftType = TYPE_ANY;
             } else {
-                emit_bytes(OP_GET_PROP, nameConst);
+                emit_bytes(cs, OP_GET_PROP, nameConst);
                 leftType = TYPE_ANY;
             }
             continue;
         }
 
-        if (precedence > get_precedence(parser.current.type)) break;
+        if (precedence > get_precedence(cs->parser.current.type)) break;
 
-        advance();
-        TokenType op = parser.previous.type;
+        advance(cs);
+        TokenType op = cs->parser.previous.type;
         Precedence nextPrec = (Precedence)(get_precedence(op) + 1);
 
         if (op == TOKEN_AND) {
-            check_type_match(TYPE_BOOL, leftType, "Left operand of '&&' must be bool");
-            int endJump = emit_jump(OP_JUMP_IF_FALSE);
-            emit_byte(OP_POP);
-            DataType rightType = parse_precedence(PREC_AND);
-            check_type_match(TYPE_BOOL, rightType, "Right operand of '&&' must be bool");
-            patch_jump(endJump);
+            check_type_match(cs, TYPE_BOOL, leftType, "Left operand of '&&' must be bool");
+            int endJump = emit_jump(cs, OP_JUMP_IF_FALSE);
+            emit_byte(cs, OP_POP);
+            DataType rightType = parse_precedence(cs, PREC_AND);
+            check_type_match(cs, TYPE_BOOL, rightType, "Right operand of '&&' must be bool");
+            patch_jump(cs, endJump);
             leftType = TYPE_BOOL;
             continue;
         }
 
         if (op == TOKEN_OR) {
-            check_type_match(TYPE_BOOL, leftType, "Left operand of '||' must be bool");
-            int elseJump = emit_jump(OP_JUMP_IF_FALSE);
-            int endJump = emit_jump(OP_JUMP);
-            patch_jump(elseJump);
-            emit_byte(OP_POP);
-            DataType rightType = parse_precedence(PREC_OR);
-            check_type_match(TYPE_BOOL, rightType, "Right operand of '||' must be bool");
-            patch_jump(endJump);
+            check_type_match(cs, TYPE_BOOL, leftType, "Left operand of '||' must be bool");
+            int elseJump = emit_jump(cs, OP_JUMP_IF_FALSE);
+            int endJump = emit_jump(cs, OP_JUMP);
+            patch_jump(cs, elseJump);
+            emit_byte(cs, OP_POP);
+            DataType rightType = parse_precedence(cs, PREC_OR);
+            check_type_match(cs, TYPE_BOOL, rightType, "Right operand of '||' must be bool");
+            patch_jump(cs, endJump);
             leftType = TYPE_BOOL;
             continue;
         }
 
-        DataType rightType = parse_precedence(nextPrec);
+        DataType rightType = parse_precedence(cs, nextPrec);
 
         switch (op) {
             case TOKEN_PLUS:
                 if (leftType == TYPE_STRING || rightType == TYPE_STRING) {
-                    check_type_match(TYPE_STRING, leftType, "Invalid operands for '+'");
-                    check_type_match(TYPE_STRING, rightType, "Invalid operands for '+'");
-                    emit_byte(OP_ADD);
+                    check_type_match(cs, TYPE_STRING, leftType, "Invalid operands for '+'");
+                    check_type_match(cs, TYPE_STRING, rightType, "Invalid operands for '+'");
+                    emit_byte(cs, OP_ADD);
                     leftType = TYPE_STRING;
                 } else if (is_float_type(leftType) || is_float_type(rightType)) {
                     if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
                         (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
-                        error("Invalid operands for '+'.");
+                        error(cs, "Invalid operands for '+'.");
                     }
-                    emit_byte(OP_FADD);
+                    emit_byte(cs, OP_FADD);
                     leftType = TYPE_DOUBLE;
                 } else {
-                    check_type_match(TYPE_INT, leftType, "Invalid operands for '+'");
-                    check_type_match(TYPE_INT, rightType, "Invalid operands for '+'");
-                    emit_byte(OP_ADD);
+                    check_type_match(cs, TYPE_INT, leftType, "Invalid operands for '+'");
+                    check_type_match(cs, TYPE_INT, rightType, "Invalid operands for '+'");
+                    emit_byte(cs, OP_ADD);
                     leftType = TYPE_INT;
                 }
                 break;
@@ -674,14 +680,14 @@ static DataType parse_precedence(Precedence precedence) {
                 if (is_float_type(leftType) || is_float_type(rightType)) {
                     if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
                         (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
-                        error("Invalid operands for '-'.");
+                        error(cs, "Invalid operands for '-'.");
                     }
-                    emit_byte(OP_FSUB);
+                    emit_byte(cs, OP_FSUB);
                     leftType = TYPE_DOUBLE;
                 } else {
-                    check_type_match(TYPE_INT, leftType, "Invalid operands for '-'");
-                    check_type_match(TYPE_INT, rightType, "Invalid operands for '-'");
-                    emit_byte(OP_SUB);
+                    check_type_match(cs, TYPE_INT, leftType, "Invalid operands for '-'");
+                    check_type_match(cs, TYPE_INT, rightType, "Invalid operands for '-'");
+                    emit_byte(cs, OP_SUB);
                     leftType = TYPE_INT;
                 }
                 break;
@@ -689,14 +695,14 @@ static DataType parse_precedence(Precedence precedence) {
                 if (is_float_type(leftType) || is_float_type(rightType)) {
                     if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
                         (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
-                        error("Invalid operands for '*'.");
+                        error(cs, "Invalid operands for '*'.");
                     }
-                    emit_byte(OP_FMUL);
+                    emit_byte(cs, OP_FMUL);
                     leftType = TYPE_DOUBLE;
                 } else {
-                    check_type_match(TYPE_INT, leftType, "Invalid operands for '*'");
-                    check_type_match(TYPE_INT, rightType, "Invalid operands for '*'");
-                    emit_byte(OP_MUL);
+                    check_type_match(cs, TYPE_INT, leftType, "Invalid operands for '*'");
+                    check_type_match(cs, TYPE_INT, rightType, "Invalid operands for '*'");
+                    emit_byte(cs, OP_MUL);
                     leftType = TYPE_INT;
                 }
                 break;
@@ -704,42 +710,42 @@ static DataType parse_precedence(Precedence precedence) {
                 if (is_float_type(leftType) || is_float_type(rightType)) {
                     if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
                         (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
-                        error("Invalid operands for '/'.");
+                        error(cs, "Invalid operands for '/'.");
                     }
-                    emit_byte(OP_FDIV);
+                    emit_byte(cs, OP_FDIV);
                     leftType = TYPE_DOUBLE;
                 } else {
-                    check_type_match(TYPE_INT, leftType, "Invalid operands for '/'");
-                    check_type_match(TYPE_INT, rightType, "Invalid operands for '/'");
-                    emit_byte(OP_DIV);
+                    check_type_match(cs, TYPE_INT, leftType, "Invalid operands for '/'");
+                    check_type_match(cs, TYPE_INT, rightType, "Invalid operands for '/'");
+                    emit_byte(cs, OP_DIV);
                     leftType = TYPE_INT;
                 }
                 break;
             case TOKEN_PERCENT:
-                check_type_match(TYPE_INT, leftType, "Operands of '%' must be int");
-                check_type_match(TYPE_INT, rightType, "Operands of '%' must be int");
-                emit_byte(OP_MOD);
+                check_type_match(cs, TYPE_INT, leftType, "Operands of '%' must be int");
+                check_type_match(cs, TYPE_INT, rightType, "Operands of '%' must be int");
+                emit_byte(cs, OP_MOD);
                 leftType = TYPE_INT;
                 break;
             case TOKEN_EQUAL_EQUAL:
-                emit_byte(OP_EQUAL);
+                emit_byte(cs, OP_EQUAL);
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_BANG_EQUAL:
-                emit_bytes(OP_EQUAL, OP_NOT);
+                emit_bytes(cs, OP_EQUAL, OP_NOT);
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_GREATER:
                 if (is_float_type(leftType) || is_float_type(rightType)) {
                     if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
                         (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
-                        error("Invalid operands for '>'.");
+                        error(cs, "Invalid operands for '>'.");
                     }
-                    emit_byte(OP_FGREATER);
+                    emit_byte(cs, OP_FGREATER);
                 } else {
-                    check_type_match(TYPE_INT, leftType, "Invalid operands for '>'");
-                    check_type_match(TYPE_INT, rightType, "Invalid operands for '>'");
-                    emit_byte(OP_GREATER);
+                    check_type_match(cs, TYPE_INT, leftType, "Invalid operands for '>'");
+                    check_type_match(cs, TYPE_INT, rightType, "Invalid operands for '>'");
+                    emit_byte(cs, OP_GREATER);
                 }
                 leftType = TYPE_BOOL;
                 break;
@@ -747,13 +753,13 @@ static DataType parse_precedence(Precedence precedence) {
                 if (is_float_type(leftType) || is_float_type(rightType)) {
                     if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
                         (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
-                        error("Invalid operands for '>='.");
+                        error(cs, "Invalid operands for '>='.");
                     }
-                    emit_bytes(OP_FLESS, OP_NOT);
+                    emit_bytes(cs, OP_FLESS, OP_NOT);
                 } else {
-                    check_type_match(TYPE_INT, leftType, "Invalid operands for '>='");
-                    check_type_match(TYPE_INT, rightType, "Invalid operands for '>='");
-                    emit_bytes(OP_LESS, OP_NOT);
+                    check_type_match(cs, TYPE_INT, leftType, "Invalid operands for '>='");
+                    check_type_match(cs, TYPE_INT, rightType, "Invalid operands for '>='");
+                    emit_bytes(cs, OP_LESS, OP_NOT);
                 }
                 leftType = TYPE_BOOL;
                 break;
@@ -761,13 +767,13 @@ static DataType parse_precedence(Precedence precedence) {
                 if (is_float_type(leftType) || is_float_type(rightType)) {
                     if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
                         (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
-                        error("Invalid operands for '<'.");
+                        error(cs, "Invalid operands for '<'.");
                     }
-                    emit_byte(OP_FLESS);
+                    emit_byte(cs, OP_FLESS);
                 } else {
-                    check_type_match(TYPE_INT, leftType, "Invalid operands for '<'");
-                    check_type_match(TYPE_INT, rightType, "Invalid operands for '<'");
-                    emit_byte(OP_LESS);
+                    check_type_match(cs, TYPE_INT, leftType, "Invalid operands for '<'");
+                    check_type_match(cs, TYPE_INT, rightType, "Invalid operands for '<'");
+                    emit_byte(cs, OP_LESS);
                 }
                 leftType = TYPE_BOOL;
                 break;
@@ -775,13 +781,13 @@ static DataType parse_precedence(Precedence precedence) {
                 if (is_float_type(leftType) || is_float_type(rightType)) {
                     if ((leftType != TYPE_INT && !is_float_type(leftType) && leftType != TYPE_ANY) ||
                         (rightType != TYPE_INT && !is_float_type(rightType) && rightType != TYPE_ANY)) {
-                        error("Invalid operands for '<='.");
+                        error(cs, "Invalid operands for '<='.");
                     }
-                    emit_bytes(OP_FGREATER, OP_NOT);
+                    emit_bytes(cs, OP_FGREATER, OP_NOT);
                 } else {
-                    check_type_match(TYPE_INT, leftType, "Invalid operands for '<='");
-                    check_type_match(TYPE_INT, rightType, "Invalid operands for '<='");
-                    emit_bytes(OP_GREATER, OP_NOT);
+                    check_type_match(cs, TYPE_INT, leftType, "Invalid operands for '<='");
+                    check_type_match(cs, TYPE_INT, rightType, "Invalid operands for '<='");
+                    emit_bytes(cs, OP_GREATER, OP_NOT);
                 }
                 leftType = TYPE_BOOL;
                 break;
@@ -793,372 +799,383 @@ static DataType parse_precedence(Precedence precedence) {
     return leftType;
 }
 
-static DataType expression(void) {
-    return parse_precedence(PREC_ASSIGNMENT);
+static DataType expression(CompilerState* cs) {
+    return parse_precedence(cs, PREC_ASSIGNMENT);
 }
 
-static void block(void) {
-    while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
-        declaration();
+static void block(CompilerState* cs) {
+    while (!check(cs, TOKEN_RIGHT_BRACE) && !check(cs, TOKEN_EOF)) {
+        declaration(cs);
     }
-    consume(TOKEN_RIGHT_BRACE, "Expect '}' after block.");
+    consume(cs, TOKEN_RIGHT_BRACE, "Expect '}' after block.");
 }
 
-static void var_declaration(DataType type, Token name) {
-    if (current->scopeDepth > 0) {
-        for (int i = current->localCount - 1; i >= 0; i--) {
-            Local* local = &current->locals[i];
-            if (local->depth != -1 && local->depth < current->scopeDepth) break;
+static void var_declaration(CompilerState* cs, DataType type, Token name) {
+    if (cs->current->scopeDepth > 0) {
+        for (int i = cs->current->localCount - 1; i >= 0; i--) {
+            Local* local = &cs->current->locals[i];
+            if (local->depth != -1 && local->depth < cs->current->scopeDepth) break;
             if (identifiers_equal(&name, &local->name)) {
-                error("Already a variable with this name in this scope.");
+                error(cs, "Already a variable with this name in this scope.");
             }
         }
-        add_local(name, type);
+        add_local(cs, name, type);
     }
 
-    if (match(TOKEN_EQUAL)) {
-        DataType valType = expression();
-        check_type_match(type, valType, "Type mismatch in variable initialization");
+    if (match(cs, TOKEN_EQUAL)) {
+        DataType valType = expression(cs);
+        check_type_match(cs, type, valType, "Type mismatch in variable initialization");
     } else {
-        if (type == TYPE_INT) emit_constant(INT_VAL(0));
-        else if (is_float_type(type)) emit_constant(FLOAT_VAL(0.0));
-        else if (type == TYPE_BOOL) emit_byte(OP_FALSE);
-        else emit_byte(OP_NIL);
+        if (type == TYPE_INT) emit_constant(cs, INT_VAL(0));
+        else if (is_float_type(type)) emit_constant(cs, FLOAT_VAL(0.0));
+        else if (type == TYPE_BOOL) emit_byte(cs, OP_FALSE);
+        else emit_byte(cs, OP_NIL);
     }
-    consume(TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
+    consume(cs, TOKEN_SEMICOLON, "Expect ';' after variable declaration.");
 
-    if (current->scopeDepth > 0) {
-        current->locals[current->localCount - 1].depth = current->scopeDepth;
+    if (cs->current->scopeDepth > 0) {
+        cs->current->locals[cs->current->localCount - 1].depth = cs->current->scopeDepth;
     } else {
-        uint8_t global = identifier_constant(&name);
-        add_global_symbol(name, type, 0, NULL, TYPE_VOID);
-        emit_bytes(OP_DEFINE_GLOBAL, global);
+        uint8_t global = identifier_constant(cs, &name);
+        add_global_symbol(cs, name, type, 0, NULL, TYPE_VOID);
+        emit_bytes(cs, OP_DEFINE_GLOBAL, global);
     }
 }
 
-static void print_statement(void) {
-    consume(TOKEN_LEFT_PAREN, "Expect '(' after print.");
-    expression();
-    consume(TOKEN_RIGHT_PAREN, "Expect ')' after value.");
-    consume(TOKEN_SEMICOLON, "Expect ';' after statement.");
-    emit_byte(OP_PRINT);
+static void print_statement(CompilerState* cs) {
+    consume(cs, TOKEN_LEFT_PAREN, "Expect '(' after print.");
+    expression(cs);
+    consume(cs, TOKEN_RIGHT_PAREN, "Expect ')' after value.");
+    consume(cs, TOKEN_SEMICOLON, "Expect ';' after statement.");
+    emit_byte(cs, OP_PRINT);
 }
 
-static void return_statement(void) {
-    if (current->type == TYPE_SCRIPT) {
-        error("Can't return from top-level code.");
+static void return_statement(CompilerState* cs) {
+    if (cs->current->type == TYPE_SCRIPT) {
+        error(cs, "Can't return from top-level code.");
     }
 
-    if (match(TOKEN_SEMICOLON)) {
-        check_type_match(current->function->returnType, TYPE_VOID, "Return value required");
-        emit_return();
+    if (match(cs, TOKEN_SEMICOLON)) {
+        check_type_match(cs, cs->current->function->returnType, TYPE_VOID, "Return value required");
+        emit_return(cs);
     } else {
-        DataType type = expression();
-        check_type_match(current->function->returnType, type, "Return type mismatch");
-        consume(TOKEN_SEMICOLON, "Expect ';' after return value.");
-        emit_byte(OP_RETURN);
+        DataType type = expression(cs);
+        check_type_match(cs, cs->current->function->returnType, type, "Return type mismatch");
+        consume(cs, TOKEN_SEMICOLON, "Expect ';' after return value.");
+        emit_byte(cs, OP_RETURN);
     }
 }
 
-static void if_statement(void) {
-    bool hasParen = match(TOKEN_LEFT_PAREN);
-    DataType condType = expression();
-    check_type_match(TYPE_BOOL, condType, "Condition must be bool");
-    if (hasParen) consume(TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
+static void if_statement(CompilerState* cs) {
+    bool hasParen = match(cs, TOKEN_LEFT_PAREN);
+    DataType condType = expression(cs);
+    check_type_match(cs, TYPE_BOOL, condType, "Condition must be bool");
+    if (hasParen) consume(cs, TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
 
-    int thenJump = emit_jump(OP_JUMP_IF_FALSE);
-    emit_byte(OP_POP);
-    statement();
+    int thenJump = emit_jump(cs, OP_JUMP_IF_FALSE);
+    emit_byte(cs, OP_POP);
+    statement(cs);
 
-    int elseJump = emit_jump(OP_JUMP);
-    patch_jump(thenJump);
-    emit_byte(OP_POP);
+    int elseJump = emit_jump(cs, OP_JUMP);
+    patch_jump(cs, thenJump);
+    emit_byte(cs, OP_POP);
 
-    if (match(TOKEN_KW_ELSE)) statement();
-    patch_jump(elseJump);
+    if (match(cs, TOKEN_KW_ELSE)) statement(cs);
+    patch_jump(cs, elseJump);
 }
 
-static void while_statement(void) {
-    int loopStart = current_chunk()->count;
-    bool hasParen = match(TOKEN_LEFT_PAREN);
-    DataType condType = expression();
-    check_type_match(TYPE_BOOL, condType, "Condition must be bool");
-    if (hasParen) consume(TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
+static void while_statement(CompilerState* cs) {
+    int loopStart = current_chunk(cs)->count;
+    bool hasParen = match(cs, TOKEN_LEFT_PAREN);
+    DataType condType = expression(cs);
+    check_type_match(cs, TYPE_BOOL, condType, "Condition must be bool");
+    if (hasParen) consume(cs, TOKEN_RIGHT_PAREN, "Expect ')' after condition.");
 
-    int exitJump = emit_jump(OP_JUMP_IF_FALSE);
-    emit_byte(OP_POP);
-    statement();
-    emit_loop(loopStart);
+    int exitJump = emit_jump(cs, OP_JUMP_IF_FALSE);
+    emit_byte(cs, OP_POP);
+    statement(cs);
+    emit_loop(cs, loopStart);
 
-    patch_jump(exitJump);
-    emit_byte(OP_POP);
+    patch_jump(cs, exitJump);
+    emit_byte(cs, OP_POP);
 }
 
-static void for_statement(void) {
-    begin_scope();
-    consume(TOKEN_LEFT_PAREN, "Expect '(' after 'for'.");
+static void for_statement(CompilerState* cs) {
+    begin_scope(cs);
+    consume(cs, TOKEN_LEFT_PAREN, "Expect '(' after 'for'.");
 
-    if (match(TOKEN_SEMICOLON)) {
-    } else if (match(TOKEN_KW_INT)) {
-        consume(TOKEN_IDENTIFIER, "Expect variable name.");
-        var_declaration(TYPE_INT, parser.previous);
+    if (match(cs, TOKEN_SEMICOLON)) {
+    } else if (match(cs, TOKEN_KW_INT)) {
+        consume(cs, TOKEN_IDENTIFIER, "Expect variable name.");
+        var_declaration(cs, TYPE_INT, cs->parser.previous);
     } else {
-        expression();
-        consume(TOKEN_SEMICOLON, "Expect ';'.");
-        emit_byte(OP_POP);
+        expression(cs);
+        consume(cs, TOKEN_SEMICOLON, "Expect ';'.");
+        emit_byte(cs, OP_POP);
     }
 
-    int loopStart = current_chunk()->count;
+    int loopStart = current_chunk(cs)->count;
     int exitJump = -1;
-    if (!match(TOKEN_SEMICOLON)) {
-        DataType condType = expression();
-        check_type_match(TYPE_BOOL, condType, "For condition must be bool");
-        consume(TOKEN_SEMICOLON, "Expect ';' after loop condition.");
+    if (!match(cs, TOKEN_SEMICOLON)) {
+        DataType condType = expression(cs);
+        check_type_match(cs, TYPE_BOOL, condType, "For condition must be bool");
+        consume(cs, TOKEN_SEMICOLON, "Expect ';' after loop condition.");
 
-        exitJump = emit_jump(OP_JUMP_IF_FALSE);
-        emit_byte(OP_POP);
+        exitJump = emit_jump(cs, OP_JUMP_IF_FALSE);
+        emit_byte(cs, OP_POP);
     }
 
-    if (!match(TOKEN_RIGHT_PAREN)) {
-        int bodyJump = emit_jump(OP_JUMP);
-        int incrementStart = current_chunk()->count;
-        expression();
-        emit_byte(OP_POP);
-        consume(TOKEN_RIGHT_PAREN, "Expect ')' after for clauses.");
+    if (!match(cs, TOKEN_RIGHT_PAREN)) {
+        int bodyJump = emit_jump(cs, OP_JUMP);
+        int incrementStart = current_chunk(cs)->count;
+        expression(cs);
+        emit_byte(cs, OP_POP);
+        consume(cs, TOKEN_RIGHT_PAREN, "Expect ')' after for clauses.");
 
-        emit_loop(loopStart);
+        emit_loop(cs, loopStart);
         loopStart = incrementStart;
-        patch_jump(bodyJump);
+        patch_jump(cs, bodyJump);
     }
 
-    statement();
-    emit_loop(loopStart);
+    statement(cs);
+    emit_loop(cs, loopStart);
 
     if (exitJump != -1) {
-        patch_jump(exitJump);
-        emit_byte(OP_POP);
+        patch_jump(cs, exitJump);
+        emit_byte(cs, OP_POP);
     }
 
-    end_scope();
+    end_scope(cs);
 }
 
-static void expression_statement(void) {
-    expression();
-    consume(TOKEN_SEMICOLON, "Expect ';' after expression.");
-    emit_byte(OP_POP);
+static void expression_statement(CompilerState* cs) {
+    expression(cs);
+    consume(cs, TOKEN_SEMICOLON, "Expect ';' after expression.");
+    emit_byte(cs, OP_POP);
 }
 
-static void statement(void) {
-    if (match(TOKEN_KW_PRINT)) {
-        print_statement();
-    } else if (match(TOKEN_KW_IF)) {
-        if_statement();
-    } else if (match(TOKEN_KW_RETURN)) {
-        return_statement();
-    } else if (match(TOKEN_KW_WHILE)) {
-        while_statement();
-    } else if (match(TOKEN_KW_FOR)) {
-        for_statement();
-    } else if (match(TOKEN_LEFT_BRACE)) {
-        begin_scope();
-        block();
-        end_scope();
+static void statement(CompilerState* cs) {
+    if (match(cs, TOKEN_KW_PRINT)) {
+        print_statement(cs);
+    } else if (match(cs, TOKEN_KW_IF)) {
+        if_statement(cs);
+    } else if (match(cs, TOKEN_KW_RETURN)) {
+        return_statement(cs);
+    } else if (match(cs, TOKEN_KW_WHILE)) {
+        while_statement(cs);
+    } else if (match(cs, TOKEN_KW_FOR)) {
+        for_statement(cs);
+    } else if (match(cs, TOKEN_LEFT_BRACE)) {
+        begin_scope(cs);
+        block(cs);
+        end_scope(cs);
     } else {
-        expression_statement();
+        expression_statement(cs);
     }
 }
 
-static void function_declaration(DataType retType, Token name) {
-    uint8_t global = identifier_constant(&name);
+static void function_declaration(CompilerState* cs, DataType retType, Token name) {
+    uint8_t global = identifier_constant(cs, &name);
 
     Compiler compiler;
-    init_compiler(&compiler, TYPE_FUNCTION, retType);
-    compiler.function->name = cd_copy_string(currentVm, name.start, name.length);
+    init_compiler(cs, &compiler, TYPE_FUNCTION, retType);
+    compiler.function->name = cd_copy_string(cs->vm, name.start, name.length);
 
-    begin_scope();
-    consume(TOKEN_LEFT_PAREN, "Expect '(' after function name.");
+    begin_scope(cs);
+    consume(cs, TOKEN_LEFT_PAREN, "Expect '(' after function name.");
 
     DataType paramTypes[16];
     int arity = 0;
 
-    if (!check(TOKEN_RIGHT_PAREN)) {
+    if (!check(cs, TOKEN_RIGHT_PAREN)) {
         do {
-            TokenType pt = parser.current.type;
-            advance();
-            DataType ptype = type_from_token(pt);
-            consume(TOKEN_IDENTIFIER, "Expect parameter name.");
-            Token pname = parser.previous;
+            TokenType pt = cs->parser.current.type;
+            advance(cs);
+            DataType ptype = type_from_token(cs, pt);
+            consume(cs, TOKEN_IDENTIFIER, "Expect parameter name.");
+            Token pname = cs->parser.previous;
 
             if (arity == 16) {
-                error_at_current("Can't have more than 16 parameters.");
+                error_at_current(cs, "Can't have more than 16 parameters.");
             } else {
                 paramTypes[arity] = ptype;
-                current->function->paramTypes[arity] = ptype;
-                current->function->arity++;
+                cs->current->function->paramTypes[arity] = ptype;
+                cs->current->function->arity++;
                 arity++;
-                add_local(pname, ptype);
-                current->locals[current->localCount - 1].depth = current->scopeDepth;
+                add_local(cs, pname, ptype);
+                cs->current->locals[cs->current->localCount - 1].depth = cs->current->scopeDepth;
             }
-        } while (match(TOKEN_COMMA));
+        } while (match(cs, TOKEN_COMMA));
     }
-    consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
+    consume(cs, TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
 
-    add_global_symbol(name, TYPE_ANY, arity, paramTypes, retType);
+    add_global_symbol(cs, name, TYPE_ANY, arity, paramTypes, retType);
 
-    if (match(TOKEN_ARROW)) {
-        DataType bodyType = expression();
-        check_type_match(retType, bodyType, "Return type mismatch in arrow function");
-        consume(TOKEN_SEMICOLON, "Expect ';' after arrow function body.");
-        emit_byte(OP_RETURN);
+    if (match(cs, TOKEN_ARROW)) {
+        DataType bodyType = expression(cs);
+        check_type_match(cs, retType, bodyType, "Return type mismatch in arrow function");
+        consume(cs, TOKEN_SEMICOLON, "Expect ';' after arrow function body.");
+        emit_byte(cs, OP_RETURN);
     } else {
-        consume(TOKEN_LEFT_BRACE, "Expect '{' before function body.");
-        block();
+        consume(cs, TOKEN_LEFT_BRACE, "Expect '{' before function body.");
+        block(cs);
     }
 
-    ObjFunction* function = end_compiler();
-    emit_bytes(OP_CONSTANT, make_constant(OBJ_VAL(function)));
-    emit_bytes(OP_DEFINE_GLOBAL, global);
+    ObjFunction* function = end_compiler(cs);
+    emit_bytes(cs, OP_CONSTANT, make_constant(cs, OBJ_VAL(function)));
+    emit_bytes(cs, OP_DEFINE_GLOBAL, global);
 }
 
-static void class_declaration(void) {
-    consume(TOKEN_IDENTIFIER, "Expect class name.");
-    Token className = parser.previous;
-    uint8_t nameConst = identifier_constant(&className);
-    add_global_symbol(className, TYPE_CLASS, 0, NULL, TYPE_CLASS);
+static void class_declaration(CompilerState* cs) {
+    consume(cs, TOKEN_IDENTIFIER, "Expect class name.");
+    Token className = cs->parser.previous;
+    uint8_t nameConst = identifier_constant(cs, &className);
+    add_global_symbol(cs, className, TYPE_CLASS, 0, NULL, TYPE_CLASS);
 
-    emit_bytes(OP_CLASS, nameConst);
-    emit_bytes(OP_DEFINE_GLOBAL, nameConst);
+    emit_bytes(cs, OP_CLASS, nameConst);
+    emit_bytes(cs, OP_DEFINE_GLOBAL, nameConst);
 
-    consume(TOKEN_LEFT_BRACE, "Expect '{' before class body.");
+    consume(cs, TOKEN_LEFT_BRACE, "Expect '{' before class body.");
 
-    while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
-        TokenType t = parser.current.type;
+    while (!check(cs, TOKEN_RIGHT_BRACE) && !check(cs, TOKEN_EOF)) {
+        TokenType t = cs->parser.current.type;
         DataType retType = TYPE_VOID;
         if (t == TOKEN_KW_INT || t == TOKEN_KW_FLOAT || t == TOKEN_KW_DOUBLE ||
             t == TOKEN_KW_BOOL || t == TOKEN_KW_STRING || t == TOKEN_KW_VOID ||
             t == TOKEN_KW_LIST || t == TOKEN_KW_MAP) {
-            advance();
-            retType = type_from_token(t);
+            advance(cs);
+            retType = type_from_token(cs, t);
         }
-        consume(TOKEN_IDENTIFIER, "Expect member name.");
-        Token memberName = parser.previous;
+        consume(cs, TOKEN_IDENTIFIER, "Expect member name.");
+        Token memberName = cs->parser.previous;
 
-        if (check(TOKEN_LEFT_PAREN)) {
-            emit_bytes(OP_GET_GLOBAL, nameConst);
+        if (check(cs, TOKEN_LEFT_PAREN)) {
+            emit_bytes(cs, OP_GET_GLOBAL, nameConst);
 
             Compiler compiler;
-            init_compiler(&compiler, TYPE_METHOD, retType);
-            current->locals[0].name.start = "this";
-            current->locals[0].name.length = 4;
-            current->locals[0].type = TYPE_CLASS;
-            compiler.function->name = cd_copy_string(currentVm, memberName.start, memberName.length);
+            init_compiler(cs, &compiler, TYPE_METHOD, retType);
+            cs->current->locals[0].name.start = "this";
+            cs->current->locals[0].name.length = 4;
+            cs->current->locals[0].type = TYPE_CLASS;
+            compiler.function->name = cd_copy_string(cs->vm, memberName.start, memberName.length);
             if (memberName.length == 4 && memcmp(memberName.start, "init", 4) == 0) {
                 compiler.function->isInitializer = true;
             }
 
-            begin_scope();
-            consume(TOKEN_LEFT_PAREN, "Expect '(' after method name.");
+            begin_scope(cs);
+            consume(cs, TOKEN_LEFT_PAREN, "Expect '(' after method name.");
             int arity = 0;
-            if (!check(TOKEN_RIGHT_PAREN)) {
+            if (!check(cs, TOKEN_RIGHT_PAREN)) {
                 do {
-                    TokenType pt = parser.current.type;
-                    advance();
-                    DataType ptype = type_from_token(pt);
-                    consume(TOKEN_IDENTIFIER, "Expect parameter name.");
-                    Token pname = parser.previous;
+                    TokenType pt = cs->parser.current.type;
+                    advance(cs);
+                    DataType ptype = type_from_token(cs, pt);
+                    consume(cs, TOKEN_IDENTIFIER, "Expect parameter name.");
+                    Token pname = cs->parser.previous;
                     if (arity == 16) {
-                        error_at_current("Can't have more than 16 parameters.");
+                        error_at_current(cs, "Can't have more than 16 parameters.");
                     } else {
                         compiler.function->paramTypes[arity] = ptype;
                         compiler.function->arity++;
                         arity++;
-                        add_local(pname, ptype);
-                        current->locals[current->localCount - 1].depth = current->scopeDepth;
+                        add_local(cs, pname, ptype);
+                        cs->current->locals[cs->current->localCount - 1].depth = cs->current->scopeDepth;
                     }
-                } while (match(TOKEN_COMMA));
+                } while (match(cs, TOKEN_COMMA));
             }
-            consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
+            consume(cs, TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
 
-            if (match(TOKEN_ARROW)) {
-                expression();
-                consume(TOKEN_SEMICOLON, "Expect ';' after arrow method.");
-                emit_byte(OP_RETURN);
+            if (match(cs, TOKEN_ARROW)) {
+                expression(cs);
+                consume(cs, TOKEN_SEMICOLON, "Expect ';' after arrow method.");
+                emit_byte(cs, OP_RETURN);
             } else {
-                consume(TOKEN_LEFT_BRACE, "Expect '{' before method body.");
-                block();
+                consume(cs, TOKEN_LEFT_BRACE, "Expect '{' before method body.");
+                block(cs);
             }
 
-            ObjFunction* methodFn = end_compiler();
-            emit_bytes(OP_CONSTANT, make_constant(OBJ_VAL(methodFn)));
-            uint8_t methodConst = identifier_constant(&memberName);
-            emit_bytes(OP_METHOD, methodConst);
+            ObjFunction* methodFn = end_compiler(cs);
+            emit_bytes(cs, OP_CONSTANT, make_constant(cs, OBJ_VAL(methodFn)));
+            uint8_t methodConst = identifier_constant(cs, &memberName);
+            emit_bytes(cs, OP_METHOD, methodConst);
+            emit_byte(cs, OP_POP);
         } else {
-            if (match(TOKEN_EQUAL)) {
-                expression();
+            uint8_t fieldConst = identifier_constant(cs, &memberName);
+            emit_bytes(cs, OP_GET_GLOBAL, nameConst);
+            if (match(cs, TOKEN_EQUAL)) {
+                DataType valType = expression(cs);
+                check_type_match(cs, retType, valType, "Type mismatch in field initializer");
+            } else {
+                if (retType == TYPE_INT) emit_constant(cs, INT_VAL(0));
+                else if (is_float_type(retType)) emit_constant(cs, FLOAT_VAL(0.0));
+                else if (retType == TYPE_BOOL) emit_byte(cs, OP_FALSE);
+                else emit_byte(cs, OP_NIL);
             }
-            consume(TOKEN_SEMICOLON, "Expect ';' after field declaration.");
+            emit_bytes(cs, OP_CLASS_FIELD, fieldConst);
+            consume(cs, TOKEN_SEMICOLON, "Expect ';' after field declaration.");
         }
     }
 
-    consume(TOKEN_RIGHT_BRACE, "Expect '}' after class body.");
+    consume(cs, TOKEN_RIGHT_BRACE, "Expect '}' after class body.");
 }
 
-static void declaration(void) {
-    if (match(TOKEN_KW_CLASS)) {
-        class_declaration();
+static void declaration(CompilerState* cs) {
+    if (match(cs, TOKEN_KW_CLASS)) {
+        class_declaration(cs);
         return;
     }
 
-    TokenType t = parser.current.type;
+    TokenType t = cs->parser.current.type;
     if (t == TOKEN_KW_INT || t == TOKEN_KW_FLOAT || t == TOKEN_KW_DOUBLE ||
         t == TOKEN_KW_BOOL || t == TOKEN_KW_STRING || t == TOKEN_KW_VOID ||
         t == TOKEN_KW_LIST || t == TOKEN_KW_MAP) {
-        advance();
-        DataType dt = type_from_token(t);
-        consume(TOKEN_IDENTIFIER, "Expect identifier.");
-        Token name = parser.previous;
-        if (check(TOKEN_LEFT_PAREN)) {
-            function_declaration(dt, name);
+        advance(cs);
+        DataType dt = type_from_token(cs, t);
+        consume(cs, TOKEN_IDENTIFIER, "Expect identifier.");
+        Token name = cs->parser.previous;
+        if (check(cs, TOKEN_LEFT_PAREN)) {
+            function_declaration(cs, dt, name);
             return;
         }
-        var_declaration(dt, name);
+        var_declaration(cs, dt, name);
         return;
     }
 
     if (t == TOKEN_IDENTIFIER) {
-        Lexer saveLexer = lexer;
+        Lexer saveLexer = cs->lexer;
         Token nextTok = lexer_next(&saveLexer);
         if (nextTok.type == TOKEN_IDENTIFIER) {
-            advance();
-            advance();
-            Token name = parser.previous;
-            if (check(TOKEN_LEFT_PAREN)) {
-                function_declaration(TYPE_ANY, name);
+            advance(cs);
+            advance(cs);
+            Token name = cs->parser.previous;
+            if (check(cs, TOKEN_LEFT_PAREN)) {
+                function_declaration(cs, TYPE_ANY, name);
                 return;
             }
-            var_declaration(TYPE_ANY, name);
+            var_declaration(cs, TYPE_ANY, name);
             return;
         }
     }
 
-    statement();
+    statement(cs);
 }
 
 ObjFunction* cd_compile(cd_State* cd, const char* source) {
-    currentVm = cd;
-    lexer_init(&lexer, source);
-    parser.hadError = false;
-    parser.panicMode = false;
-    globals.count = 0;
+    CompilerState cs;
+    cs.vm = cd;
+    cs.current = NULL;
+    cs.parser.hadError = false;
+    cs.parser.panicMode = false;
+    lexer_init(&cs.lexer, source);
 
     Compiler compiler;
-    init_compiler(&compiler, TYPE_SCRIPT, TYPE_VOID);
+    init_compiler(&cs, &compiler, TYPE_SCRIPT, TYPE_VOID);
 
-    advance();
-    while (!match(TOKEN_EOF)) {
-        declaration();
+    advance(&cs);
+    while (!match(&cs, TOKEN_EOF)) {
+        declaration(&cs);
     }
 
-    ObjFunction* function = end_compiler();
-    return parser.hadError ? NULL : function;
+    ObjFunction* function = end_compiler(&cs);
+    return cs.parser.hadError ? NULL : function;
 }

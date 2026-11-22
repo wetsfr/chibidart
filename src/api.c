@@ -255,8 +255,12 @@ void cd_setglobal(cd_State* cd, const char* name) {
 
 void cd_register(cd_State* cd, const char* name, cd_CFunction fn) {
     ObjString* str = cd_copy_string(cd, name, (int)strlen(name));
+    cd_push(cd, OBJ_VAL(str));
     ObjNative* nat = cd_new_native(cd, fn, str, -1);
+    cd_push(cd, OBJ_VAL(nat));
     table_set(&cd->globals, str, OBJ_VAL(nat));
+    cd_pop_val(cd);
+    cd_pop_val(cd);
 }
 
 int cd_pcall(cd_State* cd, int nargs, int nresults) {

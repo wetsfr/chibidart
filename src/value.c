@@ -77,11 +77,14 @@ void value_print(Value value) {
                 case OBJ_MAP: {
                     ObjMap* map = AS_MAP(value);
                     printf("{");
-                    for (int i = 0; i < map->count; i++) {
+                    int printed = 0;
+                    for (int i = 0; i < map->capacity; i++) {
+                        if (map->entries[i].state != MAP_OCCUPIED) continue;
+                        if (printed > 0) printf(", ");
                         value_print(map->entries[i].key);
                         printf(": ");
                         value_print(map->entries[i].value);
-                        if (i + 1 < map->count) printf(", ");
+                        printed++;
                     }
                     printf("}");
                     break;
@@ -125,6 +128,34 @@ static uint32_t hash_string(const char* key, int length) {
         hash *= 16777619;
     }
     return hash;
+}
+
+static uint32_t hash_u64(uint64_t x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return (uint32_t)(x ^ (x >> 32));
+}
+
+static uint32_t hash_value(Value v) {
+    switch (v.type) {
+        case VAL_NIL: return 0x9e3779b9u;
+        case VAL_BOOL: return AS_BOOL(v) ? 0x12345678u : 0x87654321u;
+        case VAL_INT: return hash_u64((uint64_t)AS_INT(v));
+        case VAL_FLOAT: {
+            double d = AS_FLOAT(v);
+            if (d == 0.0) d = 0.0;
+            uint64_t bits = 0;
+            memcpy(&bits, &d, sizeof(bits));
+            return hash_u64(bits);
+        }
+        case VAL_OBJ:
+            if (IS_STRING(v)) return AS_STRING(v)->hash;
+            return hash_u64((uint64_t)(uintptr_t)AS_OBJ(v));
+    }
+    return 0;
 }
 
 void table_init(Table* table) {
@@ -211,6 +242,24 @@ bool table_delete(Table* table, ObjString* key) {
     return true;
 }
 
+void table_add_all(Table* from, Table* to) {
+    for (int i = 0; i < from->capacity; i++) {
+        Entry* entry = &from->entries[i];
+        if (entry->key != NULL) {
+            table_set(to, entry->key, entry->value);
+        }
+    }
+}
+
+void table_remove_white(Table* table) {
+    for (int i = 0; i < table->capacity; i++) {
+        Entry* entry = &table->entries[i];
+        if (entry->key != NULL && !entry->key->obj.isMarked) {
+            table_delete(table, entry->key);
+        }
+    }
+}
+
 ObjString* table_find_string(Table* table, const char* chars, int length, uint32_t hash) {
     if (table->count == 0) return NULL;
     uint32_t index = hash & (table->capacity - 1);
@@ -228,10 +277,15 @@ ObjString* table_find_string(Table* table, const char* chars, int length, uint32
 }
 
 static Obj* allocate_object(cd_State* cd, size_t size, ObjType type) {
+    if (cd->bytesAllocated > cd->nextGC) {
+        cd_collect_garbage(cd);
+    }
     Obj* object = (Obj*)cd_reallocate(NULL, 0, size);
     object->type = type;
+    object->isMarked = false;
     object->next = cd->objects;
     cd->objects = object;
+    cd->bytesAllocated += size;
     return object;
 }
 
@@ -240,7 +294,10 @@ static ObjString* allocate_string(cd_State* cd, char* chars, int length, uint32_
     string->length = length;
     string->hash = hash;
     string->chars = chars;
+    cd->bytesAllocated += (size_t)(length + 1);
+    cd_push(cd, OBJ_VAL(string));
     table_set(&cd->strings, string, NIL_VAL);
+    cd_pop_val(cd);
     return string;
 }
 
@@ -295,6 +352,7 @@ ObjList* cd_new_list(cd_State* cd) {
 ObjMap* cd_new_map(cd_State* cd) {
     ObjMap* map = (ObjMap*)allocate_object(cd, sizeof(ObjMap), OBJ_MAP);
     map->count = 0;
+    map->used = 0;
     map->capacity = 0;
     map->entries = NULL;
     return map;
@@ -304,6 +362,7 @@ ObjClass* cd_new_class(cd_State* cd, ObjString* name) {
     ObjClass* klass = (ObjClass*)allocate_object(cd, sizeof(ObjClass), OBJ_CLASS);
     klass->name = name;
     table_init(&klass->methods);
+    table_init(&klass->defaults);
     return klass;
 }
 
@@ -311,6 +370,7 @@ ObjInstance* cd_new_instance(cd_State* cd, ObjClass* klass) {
     ObjInstance* instance = (ObjInstance*)allocate_object(cd, sizeof(ObjInstance), OBJ_INSTANCE);
     instance->klass = klass;
     table_init(&instance->fields);
+    table_add_all(&klass->defaults, &instance->fields);
     return instance;
 }
 
@@ -341,89 +401,274 @@ void list_set(ObjList* list, int64_t index, Value value) {
     }
 }
 
-bool map_get(ObjMap* map, Value key, Value* out) {
-    for (int i = 0; i < map->count; i++) {
-        if (value_equal(map->entries[i].key, key)) {
-            if (out) *out = map->entries[i].value;
-            return true;
+static MapPair* map_find_entry(MapPair* entries, int capacity, Value key) {
+    uint32_t index = hash_value(key) & (capacity - 1);
+    MapPair* tombstone = NULL;
+
+    for (;;) {
+        MapPair* entry = &entries[index];
+        if (entry->state == MAP_EMPTY) {
+            return tombstone != NULL ? tombstone : entry;
+        } else if (entry->state == MAP_TOMBSTONE) {
+            if (tombstone == NULL) tombstone = entry;
+        } else if (value_equal(entry->key, key)) {
+            return entry;
         }
+        index = (index + 1) & (capacity - 1);
     }
-    return false;
+}
+
+static void map_adjust_capacity(ObjMap* map, int capacity) {
+    MapPair* entries = CD_ALLOC(MapPair, capacity);
+    for (int i = 0; i < capacity; i++) {
+        entries[i].key = NIL_VAL;
+        entries[i].value = NIL_VAL;
+        entries[i].state = MAP_EMPTY;
+    }
+
+    map->count = 0;
+    map->used = 0;
+    for (int i = 0; i < map->capacity; i++) {
+        MapPair* entry = &map->entries[i];
+        if (entry->state != MAP_OCCUPIED) continue;
+        MapPair* dest = map_find_entry(entries, capacity, entry->key);
+        dest->key = entry->key;
+        dest->value = entry->value;
+        dest->state = MAP_OCCUPIED;
+        map->count++;
+        map->used++;
+    }
+
+    CD_FREE_ARRAY(MapPair, map->entries, map->capacity);
+    map->entries = entries;
+    map->capacity = capacity;
+}
+
+bool map_get(ObjMap* map, Value key, Value* out) {
+    if (map->count == 0) return false;
+    MapPair* entry = map_find_entry(map->entries, map->capacity, key);
+    if (entry->state != MAP_OCCUPIED) return false;
+    if (out) *out = entry->value;
+    return true;
 }
 
 void map_set(ObjMap* map, Value key, Value value) {
-    for (int i = 0; i < map->count; i++) {
-        if (value_equal(map->entries[i].key, key)) {
-            map->entries[i].value = value;
-            return;
-        }
+    if (map->used + 1 > map->capacity * 0.75) {
+        int capacity = CD_GROW_CAPACITY(map->capacity);
+        map_adjust_capacity(map, capacity);
     }
-    if (map->capacity < map->count + 1) {
-        int oldCap = map->capacity;
-        map->capacity = CD_GROW_CAPACITY(oldCap);
-        map->entries = CD_GROW_ARRAY(MapPair, map->entries, oldCap, map->capacity);
-    }
-    map->entries[map->count].key = key;
-    map->entries[map->count].value = value;
-    map->count++;
+
+    MapPair* entry = map_find_entry(map->entries, map->capacity, key);
+    if (entry->state == MAP_EMPTY) map->used++;
+    if (entry->state != MAP_OCCUPIED) map->count++;
+
+    entry->key = key;
+    entry->value = value;
+    entry->state = MAP_OCCUPIED;
 }
 
 bool map_delete(ObjMap* map, Value key) {
-    for (int i = 0; i < map->count; i++) {
-        if (value_equal(map->entries[i].key, key)) {
-            map->entries[i] = map->entries[map->count - 1];
-            map->count--;
-            return true;
-        }
-    }
-    return false;
+    if (map->count == 0) return false;
+    MapPair* entry = map_find_entry(map->entries, map->capacity, key);
+    if (entry->state != MAP_OCCUPIED) return false;
+    entry->key = NIL_VAL;
+    entry->value = NIL_VAL;
+    entry->state = MAP_TOMBSTONE;
+    map->count--;
+    return true;
 }
 
-void cd_free_object(Obj* object) {
+void cd_free_object(cd_State* cd, Obj* object) {
     switch (object->type) {
         case OBJ_STRING: {
             ObjString* string = (ObjString*)object;
+            if (cd) cd->bytesAllocated -= sizeof(ObjString) + (size_t)(string->length + 1);
             CD_FREE_ARRAY(char, string->chars, string->length + 1);
             CD_FREE(ObjString, object);
             break;
         }
         case OBJ_FUNCTION: {
             ObjFunction* function = (ObjFunction*)object;
+            if (cd) cd->bytesAllocated -= sizeof(ObjFunction);
             chunk_free(&function->chunk);
             CD_FREE(ObjFunction, object);
             break;
         }
         case OBJ_NATIVE: {
+            if (cd) cd->bytesAllocated -= sizeof(ObjNative);
             CD_FREE(ObjNative, object);
             break;
         }
         case OBJ_LIST: {
             ObjList* list = (ObjList*)object;
+            if (cd) cd->bytesAllocated -= sizeof(ObjList);
             CD_FREE_ARRAY(Value, list->items, list->capacity);
             CD_FREE(ObjList, object);
             break;
         }
         case OBJ_MAP: {
             ObjMap* map = (ObjMap*)object;
+            if (cd) cd->bytesAllocated -= sizeof(ObjMap);
             CD_FREE_ARRAY(MapPair, map->entries, map->capacity);
             CD_FREE(ObjMap, object);
             break;
         }
         case OBJ_CLASS: {
             ObjClass* klass = (ObjClass*)object;
+            if (cd) cd->bytesAllocated -= sizeof(ObjClass);
             table_free(&klass->methods);
+            table_free(&klass->defaults);
             CD_FREE(ObjClass, object);
             break;
         }
         case OBJ_INSTANCE: {
             ObjInstance* instance = (ObjInstance*)object;
+            if (cd) cd->bytesAllocated -= sizeof(ObjInstance);
             table_free(&instance->fields);
             CD_FREE(ObjInstance, object);
             break;
         }
         case OBJ_BOUND_METHOD: {
+            if (cd) cd->bytesAllocated -= sizeof(ObjBoundMethod);
             CD_FREE(ObjBoundMethod, object);
             break;
         }
     }
+}
+
+void cd_mark_object(cd_State* cd, Obj* object) {
+    if (object == NULL || object->isMarked) return;
+    object->isMarked = true;
+
+    if (cd->grayCapacity < cd->grayCount + 1) {
+        cd->grayCapacity = CD_GROW_CAPACITY(cd->grayCapacity);
+        cd->grayStack = (Obj**)realloc(cd->grayStack, sizeof(Obj*) * cd->grayCapacity);
+        if (cd->grayStack == NULL) exit(1);
+    }
+    cd->grayStack[cd->grayCount++] = object;
+}
+
+void cd_mark_value(cd_State* cd, Value value) {
+    if (IS_OBJ(value)) cd_mark_object(cd, AS_OBJ(value));
+}
+
+static void mark_array(cd_State* cd, ValueArray* array) {
+    for (int i = 0; i < array->count; i++) {
+        cd_mark_value(cd, array->values[i]);
+    }
+}
+
+static void mark_table(cd_State* cd, Table* table) {
+    for (int i = 0; i < table->capacity; i++) {
+        Entry* entry = &table->entries[i];
+        if (entry->key != NULL) {
+            cd_mark_object(cd, (Obj*)entry->key);
+            cd_mark_value(cd, entry->value);
+        }
+    }
+}
+
+static void blacken_object(cd_State* cd, Obj* object) {
+    switch (object->type) {
+        case OBJ_NATIVE: {
+            ObjNative* native = (ObjNative*)object;
+            cd_mark_object(cd, (Obj*)native->name);
+            break;
+        }
+        case OBJ_STRING:
+            break;
+        case OBJ_FUNCTION: {
+            ObjFunction* function = (ObjFunction*)object;
+            cd_mark_object(cd, (Obj*)function->name);
+            mark_array(cd, &function->chunk.constants);
+            break;
+        }
+        case OBJ_LIST: {
+            ObjList* list = (ObjList*)object;
+            for (int i = 0; i < list->count; i++) {
+                cd_mark_value(cd, list->items[i]);
+            }
+            break;
+        }
+        case OBJ_MAP: {
+            ObjMap* map = (ObjMap*)object;
+            for (int i = 0; i < map->capacity; i++) {
+                if (map->entries[i].state == MAP_OCCUPIED) {
+                    cd_mark_value(cd, map->entries[i].key);
+                    cd_mark_value(cd, map->entries[i].value);
+                }
+            }
+            break;
+        }
+        case OBJ_CLASS: {
+            ObjClass* klass = (ObjClass*)object;
+            cd_mark_object(cd, (Obj*)klass->name);
+            mark_table(cd, &klass->methods);
+            mark_table(cd, &klass->defaults);
+            break;
+        }
+        case OBJ_INSTANCE: {
+            ObjInstance* instance = (ObjInstance*)object;
+            cd_mark_object(cd, (Obj*)instance->klass);
+            mark_table(cd, &instance->fields);
+            break;
+        }
+        case OBJ_BOUND_METHOD: {
+            ObjBoundMethod* bound = (ObjBoundMethod*)object;
+            cd_mark_value(cd, bound->receiver);
+            cd_mark_object(cd, (Obj*)bound->method);
+            break;
+        }
+    }
+}
+
+static void mark_roots(cd_State* cd) {
+    for (Value* slot = cd->stack; slot < cd->stackTop; slot++) {
+        cd_mark_value(cd, *slot);
+    }
+    for (int i = 0; i < cd->frameCount; i++) {
+        cd_mark_object(cd, (Obj*)cd->frames[i].function);
+    }
+    mark_table(cd, &cd->globals);
+    for (int i = 0; i < cd->globalSymbolCount; i++) {
+        cd_mark_object(cd, (Obj*)cd->globalSymbols[i].name);
+    }
+    cd_mark_compiler_roots(cd);
+}
+
+static void trace_references(cd_State* cd) {
+    while (cd->grayCount > 0) {
+        Obj* object = cd->grayStack[--cd->grayCount];
+        blacken_object(cd, object);
+    }
+}
+
+static void sweep(cd_State* cd) {
+    Obj* previous = NULL;
+    Obj* object = cd->objects;
+    while (object != NULL) {
+        if (object->isMarked) {
+            object->isMarked = false;
+            previous = object;
+            object = object->next;
+        } else {
+            Obj* unreached = object;
+            object = object->next;
+            if (previous != NULL) {
+                previous->next = object;
+            } else {
+                cd->objects = object;
+            }
+            cd_free_object(cd, unreached);
+        }
+    }
+}
+
+void cd_collect_garbage(cd_State* cd) {
+    mark_roots(cd);
+    trace_references(cd);
+    table_remove_white(&cd->strings);
+    sweep(cd);
+    cd->nextGC = cd->bytesAllocated * 2;
+    if (cd->nextGC < 1024 * 1024) cd->nextGC = 1024 * 1024;
 }

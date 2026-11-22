@@ -49,7 +49,7 @@ static Token error_token(Lexer* lexer, const char* message) {
     return token;
 }
 
-static void skip_whitespace(Lexer* lexer) {
+static bool skip_whitespace(Lexer* lexer) {
     for (;;) {
         char c = peek(lexer);
         switch (c) {
@@ -68,21 +68,24 @@ static void skip_whitespace(Lexer* lexer) {
                 } else if (peek_next(lexer) == '*') {
                     advance(lexer);
                     advance(lexer);
+                    bool closed = false;
                     while (!is_at_end(lexer)) {
                         if (peek(lexer) == '*' && peek_next(lexer) == '/') {
                             advance(lexer);
                             advance(lexer);
+                            closed = true;
                             break;
                         }
                         if (peek(lexer) == '\n') lexer->line++;
                         advance(lexer);
                     }
+                    if (!closed) return false;
                 } else {
-                    return;
+                    return true;
                 }
                 break;
             default:
-                return;
+                return true;
         }
     }
 }
@@ -191,7 +194,9 @@ static Token string(Lexer* lexer) {
 }
 
 Token lexer_next(Lexer* lexer) {
-    skip_whitespace(lexer);
+    if (!skip_whitespace(lexer)) {
+        return error_token(lexer, "Unterminated block comment.");
+    }
     lexer->start = lexer->current;
     if (is_at_end(lexer)) return make_token(lexer, TOKEN_EOF);
 

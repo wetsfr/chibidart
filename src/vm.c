@@ -5,6 +5,15 @@ void cd_vm_init(cd_State* cd) {
     cd->stackTop = cd->stack;
     cd->apiBase = NULL;
     cd->objects = NULL;
+    cd->bytesAllocated = 0;
+    cd->nextGC = 1024 * 1024;
+    cd->grayStack = NULL;
+    cd->grayCount = 0;
+    cd->grayCapacity = 0;
+    cd->currentCompiler = NULL;
+    cd->globalSymbols = NULL;
+    cd->globalSymbolCount = 0;
+    cd->globalSymbolCapacity = 0;
     table_init(&cd->globals);
     table_init(&cd->strings);
 }
@@ -16,9 +25,14 @@ void cd_vm_free(cd_State* cd) {
     Obj* object = cd->objects;
     while (object != NULL) {
         Obj* next = object->next;
-        cd_free_object(object);
+        cd_free_object(cd, object);
         object = next;
     }
+
+    free(cd->grayStack);
+    cd->grayStack = NULL;
+    CD_FREE_ARRAY(GlobalSymbol, cd->globalSymbols, cd->globalSymbolCapacity);
+    cd->globalSymbols = NULL;
 }
 
 void cd_push(cd_State* cd, Value value) {
@@ -55,8 +69,13 @@ void cd_runtime_error(cd_State* cd, const char* format, ...) {
     for (int i = cd->frameCount - 1; i >= 0; i--) {
         CallFrame* frame = &cd->frames[i];
         ObjFunction* function = frame->function;
-        size_t instruction = frame->ip - function->chunk.code - 1;
-        int line = function->chunk.lines[instruction];
+        size_t instruction = 0;
+        if (frame->ip > function->chunk.code) {
+            instruction = (size_t)(frame->ip - function->chunk.code - 1);
+        }
+        int line = (function->chunk.count > 0 && instruction < (size_t)function->chunk.count)
+            ? function->chunk.lines[instruction]
+            : 0;
         fprintf(stderr, "[line %d] in ", line);
         if (function->name == NULL) {
             fprintf(stderr, "script\n");
@@ -115,7 +134,8 @@ static bool call_value(cd_State* cd, Value callee, int argCount) {
                 cd->apiBase = prevBase;
                 Value resVal = NIL_VAL;
                 if (result > 0) {
-                    resVal = cd_pop_val(cd);
+                    resVal = cd_peek(cd, 0);
+                    cd->stackTop -= result;
                 }
                 cd->stackTop -= (argCount + 1);
                 cd_push(cd, resVal);
@@ -130,8 +150,8 @@ static bool call_value(cd_State* cd, Value callee, int argCount) {
 }
 
 static void concatenate(cd_State* cd) {
-    ObjString* b = AS_STRING(cd_pop_val(cd));
-    ObjString* a = AS_STRING(cd_pop_val(cd));
+    ObjString* b = AS_STRING(cd_peek(cd, 0));
+    ObjString* a = AS_STRING(cd_peek(cd, 1));
 
     int length = a->length + b->length;
     char* chars = CD_ALLOC(char, length + 1);
@@ -140,6 +160,8 @@ static void concatenate(cd_State* cd) {
     chars[length] = '\0';
 
     ObjString* result = cd_take_string(cd, chars, length);
+    cd_pop_val(cd);
+    cd_pop_val(cd);
     cd_push(cd, OBJ_VAL(result));
 }
 
@@ -502,24 +524,40 @@ int cd_vm_run(cd_State* cd) {
                 cd_pop_val(cd);
                 break;
             }
+            case OP_CLASS_FIELD: {
+                ObjString* name = READ_STRING();
+                Value val = cd_peek(cd, 0);
+                Value classVal = cd_peek(cd, 1);
+                if (!IS_CLASS(classVal)) {
+                    cd_runtime_error(cd, "Invalid class field definition.");
+                    return CD_ERR_RUNTIME;
+                }
+                table_set(&AS_CLASS(classVal)->defaults, name, val);
+                cd_pop_val(cd);
+                cd_pop_val(cd);
+                break;
+            }
             case OP_GET_PROP: {
                 ObjString* prop = READ_STRING();
-                Value target = cd_pop_val(cd);
+                Value target = cd_peek(cd, 0);
                 if (IS_INSTANCE(target)) {
                     ObjInstance* instance = AS_INSTANCE(target);
                     Value val;
                     if (table_get(&instance->fields, prop, &val)) {
+                        cd_pop_val(cd);
                         cd_push(cd, val);
                         break;
                     }
                     if (table_get(&instance->klass->methods, prop, &val) && IS_FUNCTION(val)) {
                         ObjBoundMethod* bound = cd_new_bound_method(cd, target, AS_FUNCTION(val));
+                        cd_pop_val(cd);
                         cd_push(cd, OBJ_VAL(bound));
                         break;
                     }
                     cd_runtime_error(cd, "Undefined property '%s'.", prop->chars);
                     return CD_ERR_RUNTIME;
                 }
+                cd_pop_val(cd);
                 if (strcmp(prop->chars, "length") == 0) {
                     if (IS_LIST(target)) cd_push(cd, INT_VAL(AS_LIST(target)->count));
                     else if (IS_MAP(target)) cd_push(cd, INT_VAL(AS_MAP(target)->count));

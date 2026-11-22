@@ -8,6 +8,16 @@
 #define CD_FRAMES_MAX 64
 #define CD_STACK_MAX (CD_FRAMES_MAX * 256)
 
+typedef struct Compiler Compiler;
+
+typedef struct {
+    ObjString* name;
+    DataType type;
+    int arity;
+    DataType paramTypes[16];
+    DataType returnType;
+} GlobalSymbol;
+
 typedef struct {
     ObjFunction* function;
     uint8_t* ip;
@@ -23,6 +33,15 @@ struct cd_State {
     Table globals;
     Table strings;
     Obj* objects;
+    size_t bytesAllocated;
+    size_t nextGC;
+    Obj** grayStack;
+    int grayCount;
+    int grayCapacity;
+    Compiler* currentCompiler;
+    GlobalSymbol* globalSymbols;
+    int globalSymbolCount;
+    int globalSymbolCapacity;
 };
 
 void cd_vm_init(cd_State* cd);
@@ -33,5 +52,6 @@ void cd_push(cd_State* cd, Value value);
 Value cd_pop_val(cd_State* cd);
 Value cd_peek(cd_State* cd, int distance);
 void cd_runtime_error(cd_State* cd, const char* format, ...);
+void cd_mark_compiler_roots(cd_State* cd);
 
 #endif
