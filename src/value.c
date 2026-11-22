@@ -86,6 +86,21 @@ void value_print(Value value) {
                     printf("}");
                     break;
                 }
+                case OBJ_CLASS: {
+                    ObjClass* klass = AS_CLASS(value);
+                    printf("<class %s>", klass->name ? klass->name->chars : "class");
+                    break;
+                }
+                case OBJ_INSTANCE: {
+                    ObjInstance* inst = AS_INSTANCE(value);
+                    printf("<%s instance>", inst->klass->name ? inst->klass->name->chars : "instance");
+                    break;
+                }
+                case OBJ_BOUND_METHOD: {
+                    ObjBoundMethod* bm = AS_BOUND_METHOD(value);
+                    printf("<method %s>", bm->method->name ? bm->method->name->chars : "anon");
+                    break;
+                }
             }
             break;
     }
@@ -284,6 +299,27 @@ ObjMap* cd_new_map(cd_State* cd) {
     return map;
 }
 
+ObjClass* cd_new_class(cd_State* cd, ObjString* name) {
+    ObjClass* klass = (ObjClass*)allocate_object(cd, sizeof(ObjClass), OBJ_CLASS);
+    klass->name = name;
+    table_init(&klass->methods);
+    return klass;
+}
+
+ObjInstance* cd_new_instance(cd_State* cd, ObjClass* klass) {
+    ObjInstance* instance = (ObjInstance*)allocate_object(cd, sizeof(ObjInstance), OBJ_INSTANCE);
+    instance->klass = klass;
+    table_init(&instance->fields);
+    return instance;
+}
+
+ObjBoundMethod* cd_new_bound_method(cd_State* cd, Value receiver, ObjFunction* method) {
+    ObjBoundMethod* bound = (ObjBoundMethod*)allocate_object(cd, sizeof(ObjBoundMethod), OBJ_BOUND_METHOD);
+    bound->receiver = receiver;
+    bound->method = method;
+    return bound;
+}
+
 void list_append(ObjList* list, Value value) {
     if (list->capacity < list->count + 1) {
         int oldCap = list->capacity;
@@ -370,6 +406,22 @@ void cd_free_object(Obj* object) {
             ObjMap* map = (ObjMap*)object;
             CD_FREE_ARRAY(MapPair, map->entries, map->capacity);
             CD_FREE(ObjMap, object);
+            break;
+        }
+        case OBJ_CLASS: {
+            ObjClass* klass = (ObjClass*)object;
+            table_free(&klass->methods);
+            CD_FREE(ObjClass, object);
+            break;
+        }
+        case OBJ_INSTANCE: {
+            ObjInstance* instance = (ObjInstance*)object;
+            table_free(&instance->fields);
+            CD_FREE(ObjInstance, object);
+            break;
+        }
+        case OBJ_BOUND_METHOD: {
+            CD_FREE(ObjBoundMethod, object);
             break;
         }
     }

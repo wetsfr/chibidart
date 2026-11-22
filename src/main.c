@@ -68,6 +68,21 @@ static void run_tests(void) {
     );
     assert(r == CD_OK);
 
+    r = cd_dostring(cd,
+        "class Point {\n"
+        "    int x;\n"
+        "    int y;\n"
+        "    void init(int x, int y) {\n"
+        "        this.x = x;\n"
+        "        this.y = y;\n"
+        "    }\n"
+        "    int distSq() => this.x * this.x + this.y * this.y;\n"
+        "}\n"
+        "Point p = Point(3, 4);\n"
+        "print(p.distSq());\n"
+    );
+    assert(r == CD_OK);
+
     cd_close(cd);
     printf("all tests passed\n");
 }

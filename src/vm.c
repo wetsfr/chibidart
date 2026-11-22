@@ -79,6 +79,24 @@ static bool call_value(cd_State* cd, Value callee, int argCount) {
         switch (AS_OBJ(callee)->type) {
             case OBJ_FUNCTION:
                 return call(cd, AS_FUNCTION(callee), argCount);
+            case OBJ_CLASS: {
+                ObjClass* klass = AS_CLASS(callee);
+                ObjInstance* instance = cd_new_instance(cd, klass);
+                *(cd->stackTop - argCount - 1) = OBJ_VAL(instance);
+                Value initMethod;
+                if (table_get(&klass->methods, cd_copy_string(cd, "init", 4), &initMethod)) {
+                    return call(cd, AS_FUNCTION(initMethod), argCount);
+                } else if (argCount != 0) {
+                    cd_runtime_error(cd, "Expected 0 arguments but got %d.", argCount);
+                    return false;
+                }
+                return true;
+            }
+            case OBJ_BOUND_METHOD: {
+                ObjBoundMethod* bound = AS_BOUND_METHOD(callee);
+                *(cd->stackTop - argCount - 1) = bound->receiver;
+                return call(cd, bound->method, argCount);
+            }
             case OBJ_NATIVE: {
                 ObjNative* native = AS_NATIVE(callee);
                 Value* prevBase = cd->apiBase;
@@ -294,8 +312,12 @@ int cd_vm_run(cd_State* cd) {
                     cd_pop_val(cd);
                     return CD_OK;
                 }
+                Value returnVal = result;
+                if (frame->function->name && strcmp(frame->function->name->chars, "init") == 0) {
+                    returnVal = frame->slots[0];
+                }
                 cd->stackTop = frame->slots;
-                cd_push(cd, result);
+                cd_push(cd, returnVal);
                 frame = &cd->frames[cd->frameCount - 1];
                 break;
             }
@@ -372,9 +394,38 @@ int cd_vm_run(cd_State* cd) {
                 cd_push(cd, val);
                 break;
             }
+            case OP_CLASS: {
+                ObjString* name = READ_STRING();
+                ObjClass* klass = cd_new_class(cd, name);
+                cd_push(cd, OBJ_VAL(klass));
+                break;
+            }
+            case OP_METHOD: {
+                ObjString* name = READ_STRING();
+                Value methodVal = cd_peek(cd, 0);
+                ObjClass* klass = AS_CLASS(cd_peek(cd, 1));
+                table_set(&klass->methods, name, methodVal);
+                cd_pop_val(cd);
+                break;
+            }
             case OP_GET_PROP: {
                 ObjString* prop = READ_STRING();
                 Value target = cd_pop_val(cd);
+                if (IS_INSTANCE(target)) {
+                    ObjInstance* instance = AS_INSTANCE(target);
+                    Value val;
+                    if (table_get(&instance->fields, prop, &val)) {
+                        cd_push(cd, val);
+                        break;
+                    }
+                    if (table_get(&instance->klass->methods, prop, &val)) {
+                        ObjBoundMethod* bound = cd_new_bound_method(cd, target, AS_FUNCTION(val));
+                        cd_push(cd, OBJ_VAL(bound));
+                        break;
+                    }
+                    cd_runtime_error(cd, "Undefined property '%s'.", prop->chars);
+                    return CD_ERR_RUNTIME;
+                }
                 if (strcmp(prop->chars, "length") == 0) {
                     if (IS_LIST(target)) cd_push(cd, INT_VAL(AS_LIST(target)->count));
                     else if (IS_MAP(target)) cd_push(cd, INT_VAL(AS_MAP(target)->count));
@@ -386,10 +437,35 @@ int cd_vm_run(cd_State* cd) {
                 }
                 break;
             }
+            case OP_SET_PROP: {
+                ObjString* prop = READ_STRING();
+                Value val = cd_pop_val(cd);
+                Value target = cd_pop_val(cd);
+                if (!IS_INSTANCE(target)) {
+                    cd_runtime_error(cd, "Only instances have fields.");
+                    return CD_ERR_RUNTIME;
+                }
+                table_set(&AS_INSTANCE(target)->fields, prop, val);
+                cd_push(cd, val);
+                break;
+            }
             case OP_INVOKE_PROP: {
                 ObjString* method = READ_STRING();
                 uint8_t argCount = READ_BYTE();
                 Value target = cd_peek(cd, argCount);
+                if (IS_INSTANCE(target)) {
+                    ObjInstance* instance = AS_INSTANCE(target);
+                    Value methodVal;
+                    if (!table_get(&instance->klass->methods, method, &methodVal)) {
+                        cd_runtime_error(cd, "Undefined method '%s'.", method->chars);
+                        return CD_ERR_RUNTIME;
+                    }
+                    if (!call(cd, AS_FUNCTION(methodVal), argCount)) {
+                        return CD_ERR_RUNTIME;
+                    }
+                    frame = &cd->frames[cd->frameCount - 1];
+                    break;
+                }
                 if (IS_LIST(target)) {
                     ObjList* list = AS_LIST(target);
                     if (strcmp(method->chars, "add") == 0 || strcmp(method->chars, "push") == 0) {

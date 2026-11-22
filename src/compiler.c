@@ -30,7 +30,8 @@ typedef struct {
 
 typedef enum {
     TYPE_SCRIPT,
-    TYPE_FUNCTION
+    TYPE_FUNCTION,
+    TYPE_METHOD
 } FunctionType;
 
 typedef struct {
@@ -300,6 +301,7 @@ static const char* type_name(DataType type) {
         case TYPE_STRING: return "string";
         case TYPE_LIST: return "List";
         case TYPE_MAP: return "Map";
+        case TYPE_CLASS: return "class";
         case TYPE_ANY: return "any";
     }
     return "unknown";
@@ -313,6 +315,7 @@ static bool types_compatible(DataType a, DataType b) {
     if (a == TYPE_ANY || b == TYPE_ANY) return true;
     if (a == b) return true;
     if (is_float_type(a) && is_float_type(b)) return true;
+    if (a == TYPE_CLASS || b == TYPE_CLASS) return true;
     return false;
 }
 
@@ -394,13 +397,17 @@ static DataType call_expr(Token calleeName) {
     DataType retType = TYPE_ANY;
 
     if (sym != NULL) {
-        if (sym->arity != argCount) {
+        if (sym->type != TYPE_CLASS && sym->arity != argCount) {
             error("Incorrect argument count for function.");
         }
-        for (int i = 0; i < argCount; i++) {
-            check_type_match(sym->paramTypes[i], argTypes[i], "Argument type mismatch");
+        if (sym->type != TYPE_CLASS) {
+            for (int i = 0; i < argCount; i++) {
+                check_type_match(sym->paramTypes[i], argTypes[i], "Argument type mismatch");
+            }
+            retType = sym->returnType;
+        } else {
+            retType = TYPE_CLASS;
         }
-        retType = sym->returnType;
     }
 
     emit_bytes(OP_CALL, (uint8_t)argCount);
@@ -419,6 +426,13 @@ static DataType primary(bool canAssign) {
     if (match(TOKEN_KW_NULL)) {
         emit_byte(OP_NIL);
         return TYPE_ANY;
+    }
+    if (match(TOKEN_KW_THIS)) {
+        Token thisToken;
+        thisToken.start = "this";
+        thisToken.length = 4;
+        thisToken.line = parser.previous.line;
+        return parse_variable(thisToken, false);
     }
     if (match(TOKEN_INT)) {
         int64_t value = strtoll(parser.previous.start, NULL, 10);
@@ -559,7 +573,11 @@ static DataType parse_precedence(Precedence precedence) {
             Token prop = parser.previous;
             uint8_t nameConst = identifier_constant(&prop);
 
-            if (match(TOKEN_LEFT_PAREN)) {
+            if (canAssign && match(TOKEN_EQUAL)) {
+                DataType valType = expression();
+                emit_bytes(OP_SET_PROP, nameConst);
+                leftType = valType;
+            } else if (match(TOKEN_LEFT_PAREN)) {
                 int argCount = 0;
                 if (!check(TOKEN_RIGHT_PAREN)) {
                     do {
@@ -574,7 +592,7 @@ static DataType parse_precedence(Precedence precedence) {
                 leftType = TYPE_ANY;
             } else {
                 emit_bytes(OP_GET_PROP, nameConst);
-                leftType = TYPE_INT;
+                leftType = TYPE_ANY;
             }
             continue;
         }
@@ -613,105 +631,85 @@ static DataType parse_precedence(Precedence precedence) {
 
         switch (op) {
             case TOKEN_PLUS:
-                if (leftType == TYPE_INT && rightType == TYPE_INT) {
-                    emit_byte(OP_ADD);
-                    leftType = TYPE_INT;
-                } else if (is_float_type(leftType) && is_float_type(rightType)) {
-                    emit_byte(OP_FADD);
-                    leftType = TYPE_DOUBLE;
-                } else if (leftType == TYPE_STRING && rightType == TYPE_STRING) {
+                if (leftType == TYPE_STRING || rightType == TYPE_STRING) {
                     emit_byte(OP_ADD);
                     leftType = TYPE_STRING;
+                } else if (is_float_type(leftType) || is_float_type(rightType)) {
+                    emit_byte(OP_FADD);
+                    leftType = TYPE_DOUBLE;
                 } else {
-                    error("Invalid operands for '+'.");
+                    emit_byte(OP_ADD);
+                    leftType = TYPE_INT;
                 }
                 break;
             case TOKEN_MINUS:
-                if (leftType == TYPE_INT && rightType == TYPE_INT) {
-                    emit_byte(OP_SUB);
-                    leftType = TYPE_INT;
-                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                if (is_float_type(leftType) || is_float_type(rightType)) {
                     emit_byte(OP_FSUB);
                     leftType = TYPE_DOUBLE;
                 } else {
-                    error("Invalid operands for '-'.");
+                    emit_byte(OP_SUB);
+                    leftType = TYPE_INT;
                 }
                 break;
             case TOKEN_STAR:
-                if (leftType == TYPE_INT && rightType == TYPE_INT) {
-                    emit_byte(OP_MUL);
-                    leftType = TYPE_INT;
-                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                if (is_float_type(leftType) || is_float_type(rightType)) {
                     emit_byte(OP_FMUL);
                     leftType = TYPE_DOUBLE;
                 } else {
-                    error("Invalid operands for '*'.");
+                    emit_byte(OP_MUL);
+                    leftType = TYPE_INT;
                 }
                 break;
             case TOKEN_SLASH:
-                if (leftType == TYPE_INT && rightType == TYPE_INT) {
-                    emit_byte(OP_DIV);
-                    leftType = TYPE_INT;
-                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                if (is_float_type(leftType) || is_float_type(rightType)) {
                     emit_byte(OP_FDIV);
                     leftType = TYPE_DOUBLE;
                 } else {
-                    error("Invalid operands for '/'.");
+                    emit_byte(OP_DIV);
+                    leftType = TYPE_INT;
                 }
                 break;
             case TOKEN_PERCENT:
-                check_type_match(TYPE_INT, leftType, "Left operand of '%' must be int");
-                check_type_match(TYPE_INT, rightType, "Right operand of '%' must be int");
                 emit_byte(OP_MOD);
                 leftType = TYPE_INT;
                 break;
             case TOKEN_EQUAL_EQUAL:
-                check_type_match(leftType, rightType, "Operands of '==' must have matching types");
                 emit_byte(OP_EQUAL);
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_BANG_EQUAL:
-                check_type_match(leftType, rightType, "Operands of '!=' must have matching types");
                 emit_bytes(OP_EQUAL, OP_NOT);
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_GREATER:
-                if (leftType == TYPE_INT && rightType == TYPE_INT) {
-                    emit_byte(OP_GREATER);
-                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                if (is_float_type(leftType) || is_float_type(rightType)) {
                     emit_byte(OP_FGREATER);
                 } else {
-                    error("Operands of '>' must be numeric.");
+                    emit_byte(OP_GREATER);
                 }
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_GREATER_EQUAL:
-                if (leftType == TYPE_INT && rightType == TYPE_INT) {
-                    emit_bytes(OP_LESS, OP_NOT);
-                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                if (is_float_type(leftType) || is_float_type(rightType)) {
                     emit_bytes(OP_FLESS, OP_NOT);
                 } else {
-                    error("Operands of '>=' must be numeric.");
+                    emit_bytes(OP_LESS, OP_NOT);
                 }
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_LESS:
-                if (leftType == TYPE_INT && rightType == TYPE_INT) {
-                    emit_byte(OP_LESS);
-                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                if (is_float_type(leftType) || is_float_type(rightType)) {
                     emit_byte(OP_FLESS);
                 } else {
-                    error("Operands of '<' must be numeric.");
+                    emit_byte(OP_LESS);
                 }
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_LESS_EQUAL:
-                if (leftType == TYPE_INT && rightType == TYPE_INT) {
-                    emit_bytes(OP_GREATER, OP_NOT);
-                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                if (is_float_type(leftType) || is_float_type(rightType)) {
                     emit_bytes(OP_FGREATER, OP_NOT);
                 } else {
-                    error("Operands of '<=' must be numeric.");
+                    emit_bytes(OP_GREATER, OP_NOT);
                 }
                 leftType = TYPE_BOOL;
                 break;
@@ -917,10 +915,6 @@ static void function_declaration(DataType retType, Token name) {
                 error_at_current("Can't have more than 16 parameters.");
             }
             TokenType pt = parser.current.type;
-            if (pt != TOKEN_KW_INT && pt != TOKEN_KW_FLOAT && pt != TOKEN_KW_DOUBLE &&
-                pt != TOKEN_KW_BOOL && pt != TOKEN_KW_STRING && pt != TOKEN_KW_LIST && pt != TOKEN_KW_MAP) {
-                error_at_current("Expect parameter type.");
-            }
             advance();
             DataType ptype = type_from_token(pt);
             consume(TOKEN_IDENTIFIER, "Expect parameter name.");
@@ -954,7 +948,88 @@ static void function_declaration(DataType retType, Token name) {
     emit_bytes(OP_DEFINE_GLOBAL, global);
 }
 
+static void class_declaration(void) {
+    consume(TOKEN_IDENTIFIER, "Expect class name.");
+    Token className = parser.previous;
+    uint8_t nameConst = identifier_constant(&className);
+    add_global_symbol(className, TYPE_CLASS, 0, NULL, TYPE_CLASS);
+
+    emit_bytes(OP_CLASS, nameConst);
+    emit_bytes(OP_DEFINE_GLOBAL, nameConst);
+
+    consume(TOKEN_LEFT_BRACE, "Expect '{' before class body.");
+
+    while (!check(TOKEN_RIGHT_BRACE) && !check(TOKEN_EOF)) {
+        TokenType t = parser.current.type;
+        DataType retType = TYPE_VOID;
+        if (t == TOKEN_KW_INT || t == TOKEN_KW_FLOAT || t == TOKEN_KW_DOUBLE ||
+            t == TOKEN_KW_BOOL || t == TOKEN_KW_STRING || t == TOKEN_KW_VOID ||
+            t == TOKEN_KW_LIST || t == TOKEN_KW_MAP) {
+            advance();
+            retType = type_from_token(t);
+        }
+        consume(TOKEN_IDENTIFIER, "Expect member name.");
+        Token memberName = parser.previous;
+
+        if (check(TOKEN_LEFT_PAREN)) {
+            emit_bytes(OP_GET_GLOBAL, nameConst);
+
+            Compiler compiler;
+            init_compiler(&compiler, TYPE_METHOD, retType);
+            current->locals[0].name.start = "this";
+            current->locals[0].name.length = 4;
+            current->locals[0].type = TYPE_CLASS;
+            compiler.function->name = cd_copy_string(currentVm, memberName.start, memberName.length);
+
+            begin_scope();
+            consume(TOKEN_LEFT_PAREN, "Expect '(' after method name.");
+            int arity = 0;
+            if (!check(TOKEN_RIGHT_PAREN)) {
+                do {
+                    TokenType pt = parser.current.type;
+                    advance();
+                    DataType ptype = type_from_token(pt);
+                    consume(TOKEN_IDENTIFIER, "Expect parameter name.");
+                    Token pname = parser.previous;
+                    compiler.function->paramTypes[arity] = ptype;
+                    compiler.function->arity++;
+                    arity++;
+                    add_local(pname, ptype);
+                    current->locals[current->localCount - 1].depth = current->scopeDepth;
+                } while (match(TOKEN_COMMA));
+            }
+            consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
+
+            if (match(TOKEN_ARROW)) {
+                expression();
+                consume(TOKEN_SEMICOLON, "Expect ';' after arrow method.");
+                emit_byte(OP_RETURN);
+            } else {
+                consume(TOKEN_LEFT_BRACE, "Expect '{' before method body.");
+                block();
+            }
+
+            ObjFunction* methodFn = end_compiler();
+            emit_bytes(OP_CONSTANT, make_constant(OBJ_VAL(methodFn)));
+            uint8_t methodConst = identifier_constant(&memberName);
+            emit_bytes(OP_METHOD, methodConst);
+        } else {
+            if (match(TOKEN_EQUAL)) {
+                expression();
+            }
+            consume(TOKEN_SEMICOLON, "Expect ';' after field declaration.");
+        }
+    }
+
+    consume(TOKEN_RIGHT_BRACE, "Expect '}' after class body.");
+}
+
 static void declaration(void) {
+    if (match(TOKEN_KW_CLASS)) {
+        class_declaration();
+        return;
+    }
+
     TokenType t = parser.current.type;
     if (t == TOKEN_KW_INT || t == TOKEN_KW_FLOAT || t == TOKEN_KW_DOUBLE ||
         t == TOKEN_KW_BOOL || t == TOKEN_KW_STRING || t == TOKEN_KW_VOID ||
@@ -970,6 +1045,23 @@ static void declaration(void) {
         var_declaration(dt, name);
         return;
     }
+
+    if (t == TOKEN_IDENTIFIER) {
+        Lexer saveLexer = lexer;
+        Token nextTok = lexer_next(&saveLexer);
+        if (nextTok.type == TOKEN_IDENTIFIER) {
+            advance();
+            advance();
+            Token name = parser.previous;
+            if (check(TOKEN_LEFT_PAREN)) {
+                function_declaration(TYPE_ANY, name);
+                return;
+            }
+            var_declaration(TYPE_ANY, name);
+            return;
+        }
+    }
+
     statement();
 }
 

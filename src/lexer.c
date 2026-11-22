@@ -109,6 +109,8 @@ static TokenType identifier_type(Lexer* lexer) {
     switch (lexer->start[0]) {
         case 'b':
             return check_keyword(lexer, 1, 3, "ool", TOKEN_KW_BOOL);
+        case 'c':
+            return check_keyword(lexer, 1, 4, "lass", TOKEN_KW_CLASS);
         case 'd':
             return check_keyword(lexer, 1, 5, "ouble", TOKEN_KW_DOUBLE);
         case 'e':
@@ -145,7 +147,13 @@ static TokenType identifier_type(Lexer* lexer) {
         case 's':
             return check_keyword(lexer, 1, 5, "tring", TOKEN_KW_STRING);
         case 't':
-            return check_keyword(lexer, 1, 3, "rue", TOKEN_KW_TRUE);
+            if (lexer->current - lexer->start > 1) {
+                switch (lexer->start[1]) {
+                    case 'h': return check_keyword(lexer, 2, 2, "is", TOKEN_KW_THIS);
+                    case 'r': return check_keyword(lexer, 2, 2, "ue", TOKEN_KW_TRUE);
+                }
+            }
+            break;
         case 'v':
             return check_keyword(lexer, 1, 3, "oid", TOKEN_KW_VOID);
         case 'w':
