@@ -1,0 +1,46 @@
+#ifndef CD_LEXER_H
+#define CD_LEXER_H
+
+#include "common.h"
+
+typedef enum {
+    TOKEN_LEFT_PAREN, TOKEN_RIGHT_PAREN,
+    TOKEN_LEFT_BRACE, TOKEN_RIGHT_BRACE,
+    TOKEN_LEFT_BRACKET, TOKEN_RIGHT_BRACKET,
+    TOKEN_COMMA, TOKEN_DOT, TOKEN_SEMICOLON,
+    TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_PERCENT,
+    TOKEN_PLUS_EQUAL, TOKEN_MINUS_EQUAL,
+    TOKEN_BANG, TOKEN_BANG_EQUAL,
+    TOKEN_EQUAL, TOKEN_EQUAL_EQUAL,
+    TOKEN_GREATER, TOKEN_GREATER_EQUAL,
+    TOKEN_LESS, TOKEN_LESS_EQUAL,
+    TOKEN_AND, TOKEN_OR,
+    TOKEN_ARROW,
+
+    TOKEN_IDENTIFIER, TOKEN_STRING, TOKEN_INT,
+
+    TOKEN_KW_INT, TOKEN_KW_BOOL, TOKEN_KW_STRING, TOKEN_KW_VOID,
+    TOKEN_KW_IF, TOKEN_KW_ELSE, TOKEN_KW_WHILE, TOKEN_KW_FOR,
+    TOKEN_KW_RETURN, TOKEN_KW_PRINT,
+    TOKEN_KW_TRUE, TOKEN_KW_FALSE, TOKEN_KW_NULL,
+
+    TOKEN_ERROR, TOKEN_EOF
+} TokenType;
+
+typedef struct {
+    TokenType type;
+    const char* start;
+    int length;
+    int line;
+} Token;
+
+typedef struct {
+    const char* start;
+    const char* current;
+    int line;
+} Lexer;
+
+void lexer_init(Lexer* lexer, const char* source);
+Token lexer_next(Lexer* lexer);
+
+#endif
