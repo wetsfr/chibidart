@@ -33,6 +33,11 @@ int cd_dostring(cd_State* cd, const char* source) {
     ObjFunction* function = cd_compile(cd, source);
     if (function == NULL) return CD_ERR_COMPILE;
 
+    if (cd->frameCount >= CD_FRAMES_MAX || cd->stackTop >= cd->stack + CD_STACK_MAX) {
+        cd_runtime_error(cd, "Stack overflow.");
+        return CD_ERR_RUNTIME;
+    }
+
     cd_push(cd, OBJ_VAL(function));
     CallFrame* frame = &cd->frames[cd->frameCount++];
     frame->function = function;
@@ -46,8 +51,20 @@ static char* read_file(const char* path) {
     FILE* file = fopen(path, "rb");
     if (file == NULL) return NULL;
 
-    fseek(file, 0L, SEEK_END);
-    size_t fileSize = ftell(file);
+    if (fseek(file, 0L, SEEK_END) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    long size = ftell(file);
+    if (size < 0) {
+        fclose(file);
+        return NULL;
+    }
+    size_t fileSize = (size_t)size;
+    if (fileSize == SIZE_MAX) {
+        fclose(file);
+        return NULL;
+    }
     rewind(file);
 
     char* buffer = (char*)malloc(fileSize + 1);
@@ -57,6 +74,11 @@ static char* read_file(const char* path) {
     }
 
     size_t bytesRead = fread(buffer, sizeof(char), fileSize, file);
+    if (bytesRead < fileSize && ferror(file)) {
+        free(buffer);
+        fclose(file);
+        return NULL;
+    }
     buffer[bytesRead] = '\0';
 
     fclose(file);
@@ -184,17 +206,27 @@ int cd_gettop(cd_State* cd) {
 }
 
 void cd_settop(cd_State* cd, int idx) {
+    Value* base = cd->apiBase ? cd->apiBase : cd->stack;
     if (idx >= 0) {
+        int maxTop = (int)((cd->stack + CD_STACK_MAX) - base);
+        if (idx > maxTop) idx = maxTop;
         while (cd_gettop(cd) < idx) cd_pushnil(cd);
-        Value* base = cd->apiBase ? cd->apiBase : cd->stack;
         cd->stackTop = base + idx;
     } else {
-        cd->stackTop += (idx + 1);
+        Value* target = cd->stackTop + idx + 1;
+        if (target < base) target = base;
+        cd->stackTop = target;
     }
 }
 
 void cd_pop(cd_State* cd, int n) {
-    cd->stackTop -= n;
+    if (n <= 0) return;
+    Value* base = cd->apiBase ? cd->apiBase : cd->stack;
+    if (cd->stackTop - n < base) {
+        cd->stackTop = base;
+    } else {
+        cd->stackTop -= n;
+    }
 }
 
 void cd_getglobal(cd_State* cd, const char* name) {
@@ -220,6 +252,13 @@ void cd_register(cd_State* cd, const char* name, cd_CFunction fn) {
 }
 
 int cd_pcall(cd_State* cd, int nargs, int nresults) {
+    if (nargs < 0 || cd->stackTop - cd->stack < nargs + 1) {
+        return CD_ERR_RUNTIME;
+    }
+    if (cd->frameCount >= CD_FRAMES_MAX) {
+        return CD_ERR_RUNTIME;
+    }
+
     Value* calleeSlot = cd->stackTop - nargs - 1;
     Value callee = *calleeSlot;
 

@@ -249,6 +249,10 @@ static GlobalSymbol* find_global_symbol(Token* name) {
 static void add_global_symbol(Token name, DataType type, int arity, DataType* params, DataType ret) {
     GlobalSymbol* sym = find_global_symbol(&name);
     if (sym == NULL) {
+        if (globals.count >= 256) {
+            error("Too many global symbols.");
+            return;
+        }
         sym = &globals.symbols[globals.count++];
     }
     sym->name = name;
@@ -387,8 +391,12 @@ static DataType call_expr(Token calleeName) {
 
     if (!check(TOKEN_RIGHT_PAREN)) {
         do {
-            if (argCount == 16) error("Can't have more than 16 arguments.");
-            argTypes[argCount++] = expression();
+            if (argCount == 16) {
+                error("Can't have more than 16 arguments.");
+                expression();
+            } else {
+                argTypes[argCount++] = expression();
+            }
         } while (match(TOKEN_COMMA));
     }
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
@@ -471,7 +479,11 @@ static DataType primary(bool canAssign) {
         if (!check(TOKEN_RIGHT_BRACKET)) {
             do {
                 expression();
-                count++;
+                if (count == 255) {
+                    error("Too many elements in list literal.");
+                } else {
+                    count++;
+                }
             } while (match(TOKEN_COMMA));
         }
         consume(TOKEN_RIGHT_BRACKET, "Expect ']' after list elements.");
@@ -485,7 +497,11 @@ static DataType primary(bool canAssign) {
                 expression();
                 consume(TOKEN_COLON, "Expect ':' after map key.");
                 expression();
-                count++;
+                if (count == 255) {
+                    error("Too many entries in map literal.");
+                } else {
+                    count++;
+                }
             } while (match(TOKEN_COMMA));
         }
         consume(TOKEN_RIGHT_BRACE, "Expect '}' after map entries.");
@@ -582,7 +598,11 @@ static DataType parse_precedence(Precedence precedence) {
                 if (!check(TOKEN_RIGHT_PAREN)) {
                     do {
                         expression();
-                        argCount++;
+                        if (argCount == 255) {
+                            error("Can't have more than 255 arguments.");
+                        } else {
+                            argCount++;
+                        }
                     } while (match(TOKEN_COMMA));
                 }
                 consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
@@ -911,22 +931,22 @@ static void function_declaration(DataType retType, Token name) {
 
     if (!check(TOKEN_RIGHT_PAREN)) {
         do {
-            if (current->function->arity == 16) {
-                error_at_current("Can't have more than 16 parameters.");
-            }
             TokenType pt = parser.current.type;
             advance();
             DataType ptype = type_from_token(pt);
             consume(TOKEN_IDENTIFIER, "Expect parameter name.");
             Token pname = parser.previous;
 
-            paramTypes[arity] = ptype;
-            current->function->paramTypes[arity] = ptype;
-            current->function->arity++;
-            arity++;
-
-            add_local(pname, ptype);
-            current->locals[current->localCount - 1].depth = current->scopeDepth;
+            if (arity == 16) {
+                error_at_current("Can't have more than 16 parameters.");
+            } else {
+                paramTypes[arity] = ptype;
+                current->function->paramTypes[arity] = ptype;
+                current->function->arity++;
+                arity++;
+                add_local(pname, ptype);
+                current->locals[current->localCount - 1].depth = current->scopeDepth;
+            }
         } while (match(TOKEN_COMMA));
     }
     consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");
@@ -991,11 +1011,15 @@ static void class_declaration(void) {
                     DataType ptype = type_from_token(pt);
                     consume(TOKEN_IDENTIFIER, "Expect parameter name.");
                     Token pname = parser.previous;
-                    compiler.function->paramTypes[arity] = ptype;
-                    compiler.function->arity++;
-                    arity++;
-                    add_local(pname, ptype);
-                    current->locals[current->localCount - 1].depth = current->scopeDepth;
+                    if (arity == 16) {
+                        error_at_current("Can't have more than 16 parameters.");
+                    } else {
+                        compiler.function->paramTypes[arity] = ptype;
+                        compiler.function->arity++;
+                        arity++;
+                        add_local(pname, ptype);
+                        current->locals[current->localCount - 1].depth = current->scopeDepth;
+                    }
                 } while (match(TOKEN_COMMA));
             }
             consume(TOKEN_RIGHT_PAREN, "Expect ')' after parameters.");

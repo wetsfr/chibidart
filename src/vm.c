@@ -22,16 +22,26 @@ void cd_vm_free(cd_State* cd) {
 }
 
 void cd_push(cd_State* cd, Value value) {
+    if (cd->stackTop >= cd->stack + CD_STACK_MAX) {
+        cd_runtime_error(cd, "Stack overflow.");
+        return;
+    }
     *cd->stackTop = value;
     cd->stackTop++;
 }
 
 Value cd_pop_val(cd_State* cd) {
+    if (cd->stackTop <= cd->stack) {
+        return NIL_VAL;
+    }
     cd->stackTop--;
     return *cd->stackTop;
 }
 
 Value cd_peek(cd_State* cd, int distance) {
+    if (distance < 0 || cd->stackTop - 1 - distance < cd->stack) {
+        return NIL_VAL;
+    }
     return cd->stackTop[-1 - distance];
 }
 
