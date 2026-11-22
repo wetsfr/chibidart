@@ -1,0 +1,285 @@
+#include "vm.h"
+
+void cd_vm_init(cd_State* cd) {
+    cd->frameCount = 0;
+    cd->stackTop = cd->stack;
+    cd->apiBase = NULL;
+    cd->objects = NULL;
+    table_init(&cd->globals);
+    table_init(&cd->strings);
+}
+
+void cd_vm_free(cd_State* cd) {
+    table_free(&cd->globals);
+    table_free(&cd->strings);
+
+    Obj* object = cd->objects;
+    while (object != NULL) {
+        Obj* next = object->next;
+        cd_free_object(object);
+        object = next;
+    }
+}
+
+void cd_push(cd_State* cd, Value value) {
+    *cd->stackTop = value;
+    cd->stackTop++;
+}
+
+Value cd_pop_val(cd_State* cd) {
+    cd->stackTop--;
+    return *cd->stackTop;
+}
+
+Value cd_peek(cd_State* cd, int distance) {
+    return cd->stackTop[-1 - distance];
+}
+
+void cd_runtime_error(cd_State* cd, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vfprintf(stderr, format, args);
+    va_end(args);
+    fputs("\n", stderr);
+
+    for (int i = cd->frameCount - 1; i >= 0; i--) {
+        CallFrame* frame = &cd->frames[i];
+        ObjFunction* function = frame->function;
+        size_t instruction = frame->ip - function->chunk.code - 1;
+        int line = function->chunk.lines[instruction];
+        fprintf(stderr, "[line %d] in ", line);
+        if (function->name == NULL) {
+            fprintf(stderr, "script\n");
+        } else {
+            fprintf(stderr, "%s()\n", function->name->chars);
+        }
+    }
+}
+
+static bool call(cd_State* cd, ObjFunction* function, int argCount) {
+    if (argCount != function->arity) {
+        cd_runtime_error(cd, "Expected %d arguments but got %d.", function->arity, argCount);
+        return false;
+    }
+
+    if (cd->frameCount == CD_FRAMES_MAX) {
+        cd_runtime_error(cd, "Stack overflow.");
+        return false;
+    }
+
+    CallFrame* frame = &cd->frames[cd->frameCount++];
+    frame->function = function;
+    frame->ip = function->chunk.code;
+    frame->slots = cd->stackTop - argCount - 1;
+    return true;
+}
+
+static bool call_value(cd_State* cd, Value callee, int argCount) {
+    if (IS_OBJ(callee)) {
+        switch (AS_OBJ(callee)->type) {
+            case OBJ_FUNCTION:
+                return call(cd, AS_FUNCTION(callee), argCount);
+            case OBJ_NATIVE: {
+                ObjNative* native = AS_NATIVE(callee);
+                Value* prevBase = cd->apiBase;
+                cd->apiBase = cd->stackTop - argCount;
+                int result = native->function(cd);
+                cd->apiBase = prevBase;
+                Value resVal = NIL_VAL;
+                if (result > 0) {
+                    resVal = cd_pop_val(cd);
+                }
+                cd->stackTop -= (argCount + 1);
+                cd_push(cd, resVal);
+                return true;
+            }
+            default:
+                break;
+        }
+    }
+    cd_runtime_error(cd, "Can only call functions.");
+    return false;
+}
+
+static void concatenate(cd_State* cd) {
+    ObjString* b = AS_STRING(cd_pop_val(cd));
+    ObjString* a = AS_STRING(cd_pop_val(cd));
+
+    int length = a->length + b->length;
+    char* chars = CD_ALLOC(char, length + 1);
+    memcpy(chars, a->chars, a->length);
+    memcpy(chars + a->length, b->chars, b->length);
+    chars[length] = '\0';
+
+    ObjString* result = cd_take_string(cd, chars, length);
+    cd_push(cd, OBJ_VAL(result));
+}
+
+int cd_vm_run(cd_State* cd) {
+    CallFrame* frame = &cd->frames[cd->frameCount - 1];
+
+#define READ_BYTE() (*frame->ip++)
+#define READ_SHORT() (frame->ip += 2, (uint16_t)((frame->ip[-2] << 8) | frame->ip[-1]))
+#define READ_CONSTANT() (frame->function->chunk.constants.values[READ_BYTE()])
+#define READ_STRING() AS_STRING(READ_CONSTANT())
+#define BINARY_INT_OP(op) \
+    do { \
+        int64_t b = AS_INT(cd_pop_val(cd)); \
+        int64_t a = AS_INT(cd_pop_val(cd)); \
+        cd_push(cd, INT_VAL(a op b)); \
+    } while (false)
+
+    for (;;) {
+        uint8_t instruction = READ_BYTE();
+        switch (instruction) {
+            case OP_CONSTANT: {
+                Value constant = READ_CONSTANT();
+                cd_push(cd, constant);
+                break;
+            }
+            case OP_NIL:   cd_push(cd, NIL_VAL); break;
+            case OP_TRUE:  cd_push(cd, BOOL_VAL(true)); break;
+            case OP_FALSE: cd_push(cd, BOOL_VAL(false)); break;
+            case OP_POP:   cd_pop_val(cd); break;
+
+            case OP_GET_LOCAL: {
+                uint8_t slot = READ_BYTE();
+                cd_push(cd, frame->slots[slot]);
+                break;
+            }
+            case OP_SET_LOCAL: {
+                uint8_t slot = READ_BYTE();
+                frame->slots[slot] = cd_peek(cd, 0);
+                break;
+            }
+            case OP_GET_GLOBAL: {
+                ObjString* name = READ_STRING();
+                Value value;
+                if (!table_get(&cd->globals, name, &value)) {
+                    cd_runtime_error(cd, "Undefined variable '%s'.", name->chars);
+                    return CD_ERR_RUNTIME;
+                }
+                cd_push(cd, value);
+                break;
+            }
+            case OP_DEFINE_GLOBAL: {
+                ObjString* name = READ_STRING();
+                table_set(&cd->globals, name, cd_peek(cd, 0));
+                cd_pop_val(cd);
+                break;
+            }
+            case OP_SET_GLOBAL: {
+                ObjString* name = READ_STRING();
+                if (table_set(&cd->globals, name, cd_peek(cd, 0))) {
+                    table_delete(&cd->globals, name);
+                    cd_runtime_error(cd, "Undefined variable '%s'.", name->chars);
+                    return CD_ERR_RUNTIME;
+                }
+                break;
+            }
+            case OP_EQUAL: {
+                Value b = cd_pop_val(cd);
+                Value a = cd_pop_val(cd);
+                cd_push(cd, BOOL_VAL(value_equal(a, b)));
+                break;
+            }
+            case OP_GREATER: {
+                int64_t b = AS_INT(cd_pop_val(cd));
+                int64_t a = AS_INT(cd_pop_val(cd));
+                cd_push(cd, BOOL_VAL(a > b));
+                break;
+            }
+            case OP_LESS: {
+                int64_t b = AS_INT(cd_pop_val(cd));
+                int64_t a = AS_INT(cd_pop_val(cd));
+                cd_push(cd, BOOL_VAL(a < b));
+                break;
+            }
+            case OP_ADD: {
+                if (IS_STRING(cd_peek(cd, 0)) && IS_STRING(cd_peek(cd, 1))) {
+                    concatenate(cd);
+                } else if (IS_INT(cd_peek(cd, 0)) && IS_INT(cd_peek(cd, 1))) {
+                    BINARY_INT_OP(+);
+                } else {
+                    cd_runtime_error(cd, "Operands must be two integers or two strings.");
+                    return CD_ERR_RUNTIME;
+                }
+                break;
+            }
+            case OP_SUB: BINARY_INT_OP(-); break;
+            case OP_MUL: BINARY_INT_OP(*); break;
+            case OP_DIV: {
+                int64_t b = AS_INT(cd_pop_val(cd));
+                int64_t a = AS_INT(cd_pop_val(cd));
+                if (b == 0) {
+                    cd_runtime_error(cd, "Division by zero.");
+                    return CD_ERR_RUNTIME;
+                }
+                cd_push(cd, INT_VAL(a / b));
+                break;
+            }
+            case OP_MOD: {
+                int64_t b = AS_INT(cd_pop_val(cd));
+                int64_t a = AS_INT(cd_pop_val(cd));
+                if (b == 0) {
+                    cd_runtime_error(cd, "Modulo by zero.");
+                    return CD_ERR_RUNTIME;
+                }
+                cd_push(cd, INT_VAL(a % b));
+                break;
+            }
+            case OP_NOT:
+                cd_push(cd, BOOL_VAL(!AS_BOOL(cd_pop_val(cd))));
+                break;
+            case OP_NEGATE:
+                cd_push(cd, INT_VAL(-AS_INT(cd_pop_val(cd))));
+                break;
+            case OP_PRINT: {
+                value_print(cd_pop_val(cd));
+                printf("\n");
+                break;
+            }
+            case OP_JUMP: {
+                uint16_t offset = READ_SHORT();
+                frame->ip += offset;
+                break;
+            }
+            case OP_JUMP_IF_FALSE: {
+                uint16_t offset = READ_SHORT();
+                if (!AS_BOOL(cd_peek(cd, 0))) frame->ip += offset;
+                break;
+            }
+            case OP_LOOP: {
+                uint16_t offset = READ_SHORT();
+                frame->ip -= offset;
+                break;
+            }
+            case OP_CALL: {
+                int argCount = READ_BYTE();
+                if (!call_value(cd, cd_peek(cd, argCount), argCount)) {
+                    return CD_ERR_RUNTIME;
+                }
+                frame = &cd->frames[cd->frameCount - 1];
+                break;
+            }
+            case OP_RETURN: {
+                Value result = cd_pop_val(cd);
+                cd->frameCount--;
+                if (cd->frameCount == 0) {
+                    cd_pop_val(cd);
+                    return CD_OK;
+                }
+                cd->stackTop = frame->slots;
+                cd_push(cd, result);
+                frame = &cd->frames[cd->frameCount - 1];
+                break;
+            }
+        }
+    }
+
+#undef READ_BYTE
+#undef READ_SHORT
+#undef READ_CONSTANT
+#undef READ_STRING
+#undef BINARY_INT_OP
+}
