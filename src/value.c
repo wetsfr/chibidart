@@ -64,6 +64,28 @@ void value_print(Value value) {
                     else printf("<native>");
                     break;
                 }
+                case OBJ_LIST: {
+                    ObjList* list = AS_LIST(value);
+                    printf("[");
+                    for (int i = 0; i < list->count; i++) {
+                        value_print(list->items[i]);
+                        if (i + 1 < list->count) printf(", ");
+                    }
+                    printf("]");
+                    break;
+                }
+                case OBJ_MAP: {
+                    ObjMap* map = AS_MAP(value);
+                    printf("{");
+                    for (int i = 0; i < map->count; i++) {
+                        value_print(map->entries[i].key);
+                        printf(": ");
+                        value_print(map->entries[i].value);
+                        if (i + 1 < map->count) printf(", ");
+                    }
+                    printf("}");
+                    break;
+                }
             }
             break;
     }
@@ -246,6 +268,80 @@ ObjNative* cd_new_native(cd_State* cd, cd_CFunction function, ObjString* name, i
     return native;
 }
 
+ObjList* cd_new_list(cd_State* cd) {
+    ObjList* list = (ObjList*)allocate_object(cd, sizeof(ObjList), OBJ_LIST);
+    list->count = 0;
+    list->capacity = 0;
+    list->items = NULL;
+    return list;
+}
+
+ObjMap* cd_new_map(cd_State* cd) {
+    ObjMap* map = (ObjMap*)allocate_object(cd, sizeof(ObjMap), OBJ_MAP);
+    map->count = 0;
+    map->capacity = 0;
+    map->entries = NULL;
+    return map;
+}
+
+void list_append(ObjList* list, Value value) {
+    if (list->capacity < list->count + 1) {
+        int oldCap = list->capacity;
+        list->capacity = CD_GROW_CAPACITY(oldCap);
+        list->items = CD_GROW_ARRAY(Value, list->items, oldCap, list->capacity);
+    }
+    list->items[list->count++] = value;
+}
+
+Value list_get(ObjList* list, int index) {
+    if (index < 0 || index >= list->count) return NIL_VAL;
+    return list->items[index];
+}
+
+void list_set(ObjList* list, int index, Value value) {
+    if (index >= 0 && index < list->count) {
+        list->items[index] = value;
+    }
+}
+
+bool map_get(ObjMap* map, Value key, Value* out) {
+    for (int i = 0; i < map->count; i++) {
+        if (value_equal(map->entries[i].key, key)) {
+            if (out) *out = map->entries[i].value;
+            return true;
+        }
+    }
+    return false;
+}
+
+void map_set(ObjMap* map, Value key, Value value) {
+    for (int i = 0; i < map->count; i++) {
+        if (value_equal(map->entries[i].key, key)) {
+            map->entries[i].value = value;
+            return;
+        }
+    }
+    if (map->capacity < map->count + 1) {
+        int oldCap = map->capacity;
+        map->capacity = CD_GROW_CAPACITY(oldCap);
+        map->entries = CD_GROW_ARRAY(MapPair, map->entries, oldCap, map->capacity);
+    }
+    map->entries[map->count].key = key;
+    map->entries[map->count].value = value;
+    map->count++;
+}
+
+bool map_delete(ObjMap* map, Value key) {
+    for (int i = 0; i < map->count; i++) {
+        if (value_equal(map->entries[i].key, key)) {
+            map->entries[i] = map->entries[map->count - 1];
+            map->count--;
+            return true;
+        }
+    }
+    return false;
+}
+
 void cd_free_object(Obj* object) {
     switch (object->type) {
         case OBJ_STRING: {
@@ -262,6 +358,18 @@ void cd_free_object(Obj* object) {
         }
         case OBJ_NATIVE: {
             CD_FREE(ObjNative, object);
+            break;
+        }
+        case OBJ_LIST: {
+            ObjList* list = (ObjList*)object;
+            CD_FREE_ARRAY(Value, list->items, list->capacity);
+            CD_FREE(ObjList, object);
+            break;
+        }
+        case OBJ_MAP: {
+            ObjMap* map = (ObjMap*)object;
+            CD_FREE_ARRAY(MapPair, map->entries, map->capacity);
+            CD_FREE(ObjMap, object);
             break;
         }
     }

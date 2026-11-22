@@ -53,6 +53,21 @@ static void run_tests(void) {
     );
     assert(r == CD_OK);
 
+    r = cd_dostring(cd,
+        "List<int> lst = [1, 2, 3];\n"
+        "lst.push(4);\n"
+        "lst[0] = 10;\n"
+        "print(lst);\n"
+    );
+    assert(r == CD_OK);
+
+    r = cd_dostring(cd,
+        "Map<string, int> m = {\"a\": 100, \"b\": 200};\n"
+        "m[\"c\"] = 300;\n"
+        "print(m);\n"
+    );
+    assert(r == CD_OK);
+
     cd_close(cd);
     printf("all tests passed\n");
 }

@@ -299,6 +299,134 @@ int cd_vm_run(cd_State* cd) {
                 frame = &cd->frames[cd->frameCount - 1];
                 break;
             }
+            case OP_BUILD_LIST: {
+                uint8_t count = READ_BYTE();
+                ObjList* list = cd_new_list(cd);
+                for (int i = count - 1; i >= 0; i--) {
+                    list_append(list, cd_peek(cd, i));
+                }
+                cd->stackTop -= count;
+                cd_push(cd, OBJ_VAL(list));
+                break;
+            }
+            case OP_BUILD_MAP: {
+                uint8_t count = READ_BYTE();
+                ObjMap* map = cd_new_map(cd);
+                for (int i = count - 1; i >= 0; i--) {
+                    Value k = cd_peek(cd, i * 2 + 1);
+                    Value v = cd_peek(cd, i * 2);
+                    map_set(map, k, v);
+                }
+                cd->stackTop -= count * 2;
+                cd_push(cd, OBJ_VAL(map));
+                break;
+            }
+            case OP_GET_INDEX: {
+                Value index = cd_pop_val(cd);
+                Value target = cd_pop_val(cd);
+                if (IS_LIST(target)) {
+                    if (!IS_INT(index)) {
+                        cd_runtime_error(cd, "List index must be integer.");
+                        return CD_ERR_RUNTIME;
+                    }
+                    cd_push(cd, list_get(AS_LIST(target), (int)AS_INT(index)));
+                } else if (IS_MAP(target)) {
+                    Value res = NIL_VAL;
+                    map_get(AS_MAP(target), index, &res);
+                    cd_push(cd, res);
+                } else if (IS_STRING(target)) {
+                    if (!IS_INT(index)) {
+                        cd_runtime_error(cd, "String index must be integer.");
+                        return CD_ERR_RUNTIME;
+                    }
+                    ObjString* s = AS_STRING(target);
+                    int idx = (int)AS_INT(index);
+                    if (idx < 0 || idx >= s->length) {
+                        cd_push(cd, OBJ_VAL(cd_copy_string(cd, "", 0)));
+                    } else {
+                        char buf[2] = { s->chars[idx], '\0' };
+                        cd_push(cd, OBJ_VAL(cd_copy_string(cd, buf, 1)));
+                    }
+                } else {
+                    cd_runtime_error(cd, "Cannot index non-collection value.");
+                    return CD_ERR_RUNTIME;
+                }
+                break;
+            }
+            case OP_SET_INDEX: {
+                Value val = cd_pop_val(cd);
+                Value index = cd_pop_val(cd);
+                Value target = cd_pop_val(cd);
+                if (IS_LIST(target)) {
+                    if (!IS_INT(index)) {
+                        cd_runtime_error(cd, "List index must be integer.");
+                        return CD_ERR_RUNTIME;
+                    }
+                    list_set(AS_LIST(target), (int)AS_INT(index), val);
+                } else if (IS_MAP(target)) {
+                    map_set(AS_MAP(target), index, val);
+                } else {
+                    cd_runtime_error(cd, "Cannot set index on non-collection.");
+                    return CD_ERR_RUNTIME;
+                }
+                cd_push(cd, val);
+                break;
+            }
+            case OP_GET_PROP: {
+                ObjString* prop = READ_STRING();
+                Value target = cd_pop_val(cd);
+                if (strcmp(prop->chars, "length") == 0) {
+                    if (IS_LIST(target)) cd_push(cd, INT_VAL(AS_LIST(target)->count));
+                    else if (IS_MAP(target)) cd_push(cd, INT_VAL(AS_MAP(target)->count));
+                    else if (IS_STRING(target)) cd_push(cd, INT_VAL(AS_STRING(target)->length));
+                    else cd_push(cd, INT_VAL(0));
+                } else {
+                    cd_runtime_error(cd, "Unknown property '%s'.", prop->chars);
+                    return CD_ERR_RUNTIME;
+                }
+                break;
+            }
+            case OP_INVOKE_PROP: {
+                ObjString* method = READ_STRING();
+                uint8_t argCount = READ_BYTE();
+                Value target = cd_peek(cd, argCount);
+                if (IS_LIST(target)) {
+                    ObjList* list = AS_LIST(target);
+                    if (strcmp(method->chars, "add") == 0 || strcmp(method->chars, "push") == 0) {
+                        Value arg = cd_peek(cd, 0);
+                        list_append(list, arg);
+                        cd->stackTop -= (argCount + 1);
+                        cd_push(cd, arg);
+                    } else if (strcmp(method->chars, "pop") == 0) {
+                        Value res = list->count > 0 ? list->items[--list->count] : NIL_VAL;
+                        cd->stackTop -= (argCount + 1);
+                        cd_push(cd, res);
+                    } else {
+                        cd_runtime_error(cd, "Unknown list method '%s'.", method->chars);
+                        return CD_ERR_RUNTIME;
+                    }
+                } else if (IS_MAP(target)) {
+                    ObjMap* map = AS_MAP(target);
+                    if (strcmp(method->chars, "has") == 0) {
+                        Value key = cd_peek(cd, 0);
+                        bool exists = map_get(map, key, NULL);
+                        cd->stackTop -= (argCount + 1);
+                        cd_push(cd, BOOL_VAL(exists));
+                    } else if (strcmp(method->chars, "remove") == 0) {
+                        Value key = cd_peek(cd, 0);
+                        bool removed = map_delete(map, key);
+                        cd->stackTop -= (argCount + 1);
+                        cd_push(cd, BOOL_VAL(removed));
+                    } else {
+                        cd_runtime_error(cd, "Unknown map method '%s'.", method->chars);
+                        return CD_ERR_RUNTIME;
+                    }
+                } else {
+                    cd_runtime_error(cd, "Cannot call method '%s' on non-object.", method->chars);
+                    return CD_ERR_RUNTIME;
+                }
+                break;
+            }
         }
     }
 

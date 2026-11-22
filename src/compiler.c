@@ -272,6 +272,20 @@ static DataType type_from_token(TokenType type) {
         case TOKEN_KW_BOOL: return TYPE_BOOL;
         case TOKEN_KW_STRING: return TYPE_STRING;
         case TOKEN_KW_VOID: return TYPE_VOID;
+        case TOKEN_KW_LIST: {
+            if (match(TOKEN_LESS)) {
+                while (!check(TOKEN_GREATER) && !check(TOKEN_EOF)) advance();
+                consume(TOKEN_GREATER, "Expect '>' after type argument.");
+            }
+            return TYPE_LIST;
+        }
+        case TOKEN_KW_MAP: {
+            if (match(TOKEN_LESS)) {
+                while (!check(TOKEN_GREATER) && !check(TOKEN_EOF)) advance();
+                consume(TOKEN_GREATER, "Expect '>' after type arguments.");
+            }
+            return TYPE_MAP;
+        }
         default: return TYPE_ANY;
     }
 }
@@ -284,6 +298,8 @@ static const char* type_name(DataType type) {
         case TYPE_DOUBLE: return "double";
         case TYPE_BOOL: return "bool";
         case TYPE_STRING: return "string";
+        case TYPE_LIST: return "List";
+        case TYPE_MAP: return "Map";
         case TYPE_ANY: return "any";
     }
     return "unknown";
@@ -436,6 +452,32 @@ static DataType primary(bool canAssign) {
         emit_constant(OBJ_VAL(str));
         return TYPE_STRING;
     }
+    if (match(TOKEN_LEFT_BRACKET)) {
+        int count = 0;
+        if (!check(TOKEN_RIGHT_BRACKET)) {
+            do {
+                expression();
+                count++;
+            } while (match(TOKEN_COMMA));
+        }
+        consume(TOKEN_RIGHT_BRACKET, "Expect ']' after list elements.");
+        emit_bytes(OP_BUILD_LIST, (uint8_t)count);
+        return TYPE_LIST;
+    }
+    if (match(TOKEN_LEFT_BRACE)) {
+        int count = 0;
+        if (!check(TOKEN_RIGHT_BRACE)) {
+            do {
+                expression();
+                consume(TOKEN_COLON, "Expect ':' after map key.");
+                expression();
+                count++;
+            } while (match(TOKEN_COMMA));
+        }
+        consume(TOKEN_RIGHT_BRACE, "Expect '}' after map entries.");
+        emit_bytes(OP_BUILD_MAP, (uint8_t)count);
+        return TYPE_MAP;
+    }
     if (match(TOKEN_LEFT_PAREN)) {
         DataType type = expression();
         consume(TOKEN_RIGHT_PAREN, "Expect ')' after expression.");
@@ -497,7 +539,48 @@ static DataType parse_precedence(Precedence precedence) {
     bool canAssign = precedence <= PREC_ASSIGNMENT;
     DataType leftType = primary(canAssign);
 
-    while (precedence <= get_precedence(parser.current.type)) {
+    for (;;) {
+        if (match(TOKEN_LEFT_BRACKET)) {
+            expression();
+            consume(TOKEN_RIGHT_BRACKET, "Expect ']' after index.");
+            if (canAssign && match(TOKEN_EQUAL)) {
+                DataType valType = expression();
+                emit_byte(OP_SET_INDEX);
+                leftType = valType;
+            } else {
+                emit_byte(OP_GET_INDEX);
+                leftType = TYPE_ANY;
+            }
+            continue;
+        }
+
+        if (match(TOKEN_DOT)) {
+            consume(TOKEN_IDENTIFIER, "Expect property or method name.");
+            Token prop = parser.previous;
+            uint8_t nameConst = identifier_constant(&prop);
+
+            if (match(TOKEN_LEFT_PAREN)) {
+                int argCount = 0;
+                if (!check(TOKEN_RIGHT_PAREN)) {
+                    do {
+                        expression();
+                        argCount++;
+                    } while (match(TOKEN_COMMA));
+                }
+                consume(TOKEN_RIGHT_PAREN, "Expect ')' after arguments.");
+                emit_byte(OP_INVOKE_PROP);
+                emit_byte(nameConst);
+                emit_byte((uint8_t)argCount);
+                leftType = TYPE_ANY;
+            } else {
+                emit_bytes(OP_GET_PROP, nameConst);
+                leftType = TYPE_INT;
+            }
+            continue;
+        }
+
+        if (precedence > get_precedence(parser.current.type)) break;
+
         advance();
         TokenType op = parser.previous.type;
         Precedence nextPrec = (Precedence)(get_precedence(op) + 1);
@@ -835,7 +918,7 @@ static void function_declaration(DataType retType, Token name) {
             }
             TokenType pt = parser.current.type;
             if (pt != TOKEN_KW_INT && pt != TOKEN_KW_FLOAT && pt != TOKEN_KW_DOUBLE &&
-                pt != TOKEN_KW_BOOL && pt != TOKEN_KW_STRING) {
+                pt != TOKEN_KW_BOOL && pt != TOKEN_KW_STRING && pt != TOKEN_KW_LIST && pt != TOKEN_KW_MAP) {
                 error_at_current("Expect parameter type.");
             }
             advance();
@@ -874,7 +957,8 @@ static void function_declaration(DataType retType, Token name) {
 static void declaration(void) {
     TokenType t = parser.current.type;
     if (t == TOKEN_KW_INT || t == TOKEN_KW_FLOAT || t == TOKEN_KW_DOUBLE ||
-        t == TOKEN_KW_BOOL || t == TOKEN_KW_STRING || t == TOKEN_KW_VOID) {
+        t == TOKEN_KW_BOOL || t == TOKEN_KW_STRING || t == TOKEN_KW_VOID ||
+        t == TOKEN_KW_LIST || t == TOKEN_KW_MAP) {
         advance();
         DataType dt = type_from_token(t);
         consume(TOKEN_IDENTIFIER, "Expect identifier.");

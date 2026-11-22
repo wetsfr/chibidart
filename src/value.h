@@ -8,6 +8,8 @@ typedef struct Obj Obj;
 typedef struct ObjString ObjString;
 typedef struct ObjFunction ObjFunction;
 typedef struct ObjNative ObjNative;
+typedef struct ObjList ObjList;
+typedef struct ObjMap ObjMap;
 typedef struct cd_State cd_State;
 
 typedef enum {
@@ -17,6 +19,8 @@ typedef enum {
     TYPE_DOUBLE,
     TYPE_BOOL,
     TYPE_STRING,
+    TYPE_LIST,
+    TYPE_MAP,
     TYPE_ANY
 } DataType;
 
@@ -58,7 +62,9 @@ typedef struct {
 typedef enum {
     OBJ_STRING,
     OBJ_FUNCTION,
-    OBJ_NATIVE
+    OBJ_NATIVE,
+    OBJ_LIST,
+    OBJ_MAP
 } ObjType;
 
 struct Obj {
@@ -80,6 +86,25 @@ struct ObjNative {
     int arity;
 };
 
+struct ObjList {
+    Obj obj;
+    int count;
+    int capacity;
+    Value* items;
+};
+
+typedef struct {
+    Value key;
+    Value value;
+} MapPair;
+
+struct ObjMap {
+    Obj obj;
+    int count;
+    int capacity;
+    MapPair* entries;
+};
+
 static inline bool cd_is_obj_type(Value v, ObjType type) {
     return IS_OBJ(v) && AS_OBJ(v)->type == type;
 }
@@ -87,11 +112,15 @@ static inline bool cd_is_obj_type(Value v, ObjType type) {
 #define IS_STRING(v) cd_is_obj_type(v, OBJ_STRING)
 #define IS_FUNCTION(v) cd_is_obj_type(v, OBJ_FUNCTION)
 #define IS_NATIVE(v) cd_is_obj_type(v, OBJ_NATIVE)
+#define IS_LIST(v) cd_is_obj_type(v, OBJ_LIST)
+#define IS_MAP(v) cd_is_obj_type(v, OBJ_MAP)
 
 #define AS_STRING(v) ((ObjString*)AS_OBJ(v))
 #define AS_CSTRING(v) (((ObjString*)AS_OBJ(v))->chars)
 #define AS_FUNCTION(v) ((ObjFunction*)AS_OBJ(v))
 #define AS_NATIVE(v) ((ObjNative*)AS_OBJ(v))
+#define AS_LIST(v) ((ObjList*)AS_OBJ(v))
+#define AS_MAP(v) ((ObjMap*)AS_OBJ(v))
 
 typedef struct {
     int capacity;
@@ -127,6 +156,16 @@ ObjString* cd_copy_string(cd_State* cd, const char* chars, int length);
 ObjString* cd_take_string(cd_State* cd, char* chars, int length);
 ObjFunction* cd_new_function(cd_State* cd);
 ObjNative* cd_new_native(cd_State* cd, cd_CFunction function, ObjString* name, int arity);
+ObjList* cd_new_list(cd_State* cd);
+ObjMap* cd_new_map(cd_State* cd);
 void cd_free_object(Obj* object);
+
+void list_append(ObjList* list, Value value);
+Value list_get(ObjList* list, int index);
+void list_set(ObjList* list, int index, Value value);
+
+bool map_get(ObjMap* map, Value key, Value* out);
+void map_set(ObjMap* map, Value key, Value value);
+bool map_delete(ObjMap* map, Value key);
 
 #endif

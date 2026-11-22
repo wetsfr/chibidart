@@ -38,6 +38,12 @@ typedef enum {
     OP_LOOP,
     OP_CALL,
     OP_RETURN,
+    OP_BUILD_LIST,
+    OP_BUILD_MAP,
+    OP_GET_INDEX,
+    OP_SET_INDEX,
+    OP_GET_PROP,
+    OP_INVOKE_PROP
 } OpCode;
 
 typedef struct {

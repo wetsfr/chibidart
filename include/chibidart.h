@@ -24,12 +24,16 @@ void cd_pushint(cd_State* cd, int64_t val);
 void cd_pushfloat(cd_State* cd, double val);
 void cd_pushstring(cd_State* cd, const char* str);
 void cd_pushlstring(cd_State* cd, const char* str, size_t len);
+void cd_pushlist(cd_State* cd);
+void cd_pushmap(cd_State* cd);
 
 bool cd_isnil(cd_State* cd, int idx);
 bool cd_isbool(cd_State* cd, int idx);
 bool cd_isint(cd_State* cd, int idx);
 bool cd_isfloat(cd_State* cd, int idx);
 bool cd_isstring(cd_State* cd, int idx);
+bool cd_islist(cd_State* cd, int idx);
+bool cd_ismap(cd_State* cd, int idx);
 
 bool cd_tobool(cd_State* cd, int idx);
 int64_t cd_toint(cd_State* cd, int idx);

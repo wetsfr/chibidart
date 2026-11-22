@@ -106,6 +106,14 @@ void cd_pushlstring(cd_State* cd, const char* str, size_t len) {
     cd_push(cd, OBJ_VAL(cd_copy_string(cd, str, (int)len)));
 }
 
+void cd_pushlist(cd_State* cd) {
+    cd_push(cd, OBJ_VAL(cd_new_list(cd)));
+}
+
+void cd_pushmap(cd_State* cd) {
+    cd_push(cd, OBJ_VAL(cd_new_map(cd)));
+}
+
 bool cd_isnil(cd_State* cd, int idx) {
     Value* slot = index_to_slot(cd, idx);
     return slot && IS_NIL(*slot);
@@ -129,6 +137,16 @@ bool cd_isfloat(cd_State* cd, int idx) {
 bool cd_isstring(cd_State* cd, int idx) {
     Value* slot = index_to_slot(cd, idx);
     return slot && IS_STRING(*slot);
+}
+
+bool cd_islist(cd_State* cd, int idx) {
+    Value* slot = index_to_slot(cd, idx);
+    return slot && IS_LIST(*slot);
+}
+
+bool cd_ismap(cd_State* cd, int idx) {
+    Value* slot = index_to_slot(cd, idx);
+    return slot && IS_MAP(*slot);
 }
 
 bool cd_tobool(cd_State* cd, int idx) {
