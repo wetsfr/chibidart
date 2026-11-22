@@ -109,12 +109,15 @@ static TokenType identifier_type(Lexer* lexer) {
     switch (lexer->start[0]) {
         case 'b':
             return check_keyword(lexer, 1, 3, "ool", TOKEN_KW_BOOL);
+        case 'd':
+            return check_keyword(lexer, 1, 5, "ouble", TOKEN_KW_DOUBLE);
         case 'e':
             return check_keyword(lexer, 1, 3, "lse", TOKEN_KW_ELSE);
         case 'f':
             if (lexer->current - lexer->start > 1) {
                 switch (lexer->start[1]) {
                     case 'a': return check_keyword(lexer, 2, 3, "lse", TOKEN_KW_FALSE);
+                    case 'l': return check_keyword(lexer, 2, 3, "oat", TOKEN_KW_FLOAT);
                     case 'o': return check_keyword(lexer, 2, 1, "r", TOKEN_KW_FOR);
                 }
             }
@@ -152,6 +155,11 @@ static Token identifier(Lexer* lexer) {
 
 static Token number(Lexer* lexer) {
     while (is_digit(peek(lexer))) advance(lexer);
+    if (peek(lexer) == '.' && is_digit(peek_next(lexer))) {
+        advance(lexer);
+        while (is_digit(peek(lexer))) advance(lexer);
+        return make_token(lexer, TOKEN_FLOAT);
+    }
     return make_token(lexer, TOKEN_INT);
 }
 

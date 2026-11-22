@@ -13,6 +13,8 @@ typedef struct cd_State cd_State;
 typedef enum {
     TYPE_VOID,
     TYPE_INT,
+    TYPE_FLOAT,
+    TYPE_DOUBLE,
     TYPE_BOOL,
     TYPE_STRING,
     TYPE_ANY
@@ -22,6 +24,7 @@ typedef enum {
     VAL_NIL,
     VAL_BOOL,
     VAL_INT,
+    VAL_FLOAT,
     VAL_OBJ
 } ValueType;
 
@@ -30,6 +33,7 @@ typedef struct {
     union {
         bool boolean;
         int64_t integer;
+        double number;
         Obj* obj;
     } as;
 } Value;
@@ -37,15 +41,18 @@ typedef struct {
 #define IS_NIL(v) ((v).type == VAL_NIL)
 #define IS_BOOL(v) ((v).type == VAL_BOOL)
 #define IS_INT(v) ((v).type == VAL_INT)
+#define IS_FLOAT(v) ((v).type == VAL_FLOAT)
 #define IS_OBJ(v) ((v).type == VAL_OBJ)
 
 #define AS_BOOL(v) ((v).as.boolean)
 #define AS_INT(v) ((v).as.integer)
+#define AS_FLOAT(v) ((v).as.number)
 #define AS_OBJ(v) ((v).as.obj)
 
 #define NIL_VAL ((Value){VAL_NIL, {.integer = 0}})
 #define BOOL_VAL(b) ((Value){VAL_BOOL, {.boolean = (b)}})
 #define INT_VAL(i) ((Value){VAL_INT, {.integer = (i)}})
+#define FLOAT_VAL(f) ((Value){VAL_FLOAT, {.number = (f)}})
 #define OBJ_VAL(o) ((Value){VAL_OBJ, {.obj = (Obj*)(o)}})
 
 typedef enum {

@@ -86,6 +86,10 @@ void cd_pushint(cd_State* cd, int64_t val) {
     cd_push(cd, INT_VAL(val));
 }
 
+void cd_pushfloat(cd_State* cd, double val) {
+    cd_push(cd, FLOAT_VAL(val));
+}
+
 void cd_pushstring(cd_State* cd, const char* str) {
     if (str == NULL) {
         cd_pushnil(cd);
@@ -117,6 +121,11 @@ bool cd_isint(cd_State* cd, int idx) {
     return slot && IS_INT(*slot);
 }
 
+bool cd_isfloat(cd_State* cd, int idx) {
+    Value* slot = index_to_slot(cd, idx);
+    return slot && IS_FLOAT(*slot);
+}
+
 bool cd_isstring(cd_State* cd, int idx) {
     Value* slot = index_to_slot(cd, idx);
     return slot && IS_STRING(*slot);
@@ -131,8 +140,18 @@ bool cd_tobool(cd_State* cd, int idx) {
 
 int64_t cd_toint(cd_State* cd, int idx) {
     Value* slot = index_to_slot(cd, idx);
-    if (!slot || !IS_INT(*slot)) return 0;
-    return AS_INT(*slot);
+    if (!slot) return 0;
+    if (IS_INT(*slot)) return AS_INT(*slot);
+    if (IS_FLOAT(*slot)) return (int64_t)AS_FLOAT(*slot);
+    return 0;
+}
+
+double cd_tofloat(cd_State* cd, int idx) {
+    Value* slot = index_to_slot(cd, idx);
+    if (!slot) return 0.0;
+    if (IS_FLOAT(*slot)) return AS_FLOAT(*slot);
+    if (IS_INT(*slot)) return (double)AS_INT(*slot);
+    return 0.0;
 }
 
 const char* cd_tostring(cd_State* cd, int idx) {

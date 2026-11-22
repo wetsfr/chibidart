@@ -44,6 +44,9 @@ void value_print(Value value) {
         case VAL_INT:
             printf("%lld", (long long)AS_INT(value));
             break;
+        case VAL_FLOAT:
+            printf("%g", AS_FLOAT(value));
+            break;
         case VAL_OBJ:
             switch (AS_OBJ(value)->type) {
                 case OBJ_STRING:
@@ -72,6 +75,7 @@ bool value_equal(Value a, Value b) {
         case VAL_NIL: return true;
         case VAL_BOOL: return AS_BOOL(a) == AS_BOOL(b);
         case VAL_INT: return AS_INT(a) == AS_INT(b);
+        case VAL_FLOAT: return AS_FLOAT(a) == AS_FLOAT(b);
         case VAL_OBJ: return AS_OBJ(a) == AS_OBJ(b);
         default: return false;
     }

@@ -21,6 +21,14 @@ static void run_tests(void) {
     assert(r == CD_OK);
 
     r = cd_dostring(cd,
+        "double x = 3.14;\n"
+        "float y = 2.0;\n"
+        "double z = x * y + 1.5;\n"
+        "print(z);\n"
+    );
+    assert(r == CD_OK);
+
+    r = cd_dostring(cd,
         "int fib(int n) {\n"
         "    if (n <= 1) return n;\n"
         "    return fib(n - 1) + fib(n - 2);\n"

@@ -128,6 +128,12 @@ int cd_vm_run(cd_State* cd) {
         int64_t a = AS_INT(cd_pop_val(cd)); \
         cd_push(cd, INT_VAL(a op b)); \
     } while (false)
+#define BINARY_FLOAT_OP(op) \
+    do { \
+        double b = AS_FLOAT(cd_pop_val(cd)); \
+        double a = AS_FLOAT(cd_pop_val(cd)); \
+        cd_push(cd, FLOAT_VAL(a op b)); \
+    } while (false)
 
     for (;;) {
         uint8_t instruction = READ_BYTE();
@@ -228,6 +234,25 @@ int cd_vm_run(cd_State* cd) {
                 cd_push(cd, INT_VAL(a % b));
                 break;
             }
+            case OP_FADD: BINARY_FLOAT_OP(+); break;
+            case OP_FSUB: BINARY_FLOAT_OP(-); break;
+            case OP_FMUL: BINARY_FLOAT_OP(*); break;
+            case OP_FDIV: BINARY_FLOAT_OP(/); break;
+            case OP_FGREATER: {
+                double b = AS_FLOAT(cd_pop_val(cd));
+                double a = AS_FLOAT(cd_pop_val(cd));
+                cd_push(cd, BOOL_VAL(a > b));
+                break;
+            }
+            case OP_FLESS: {
+                double b = AS_FLOAT(cd_pop_val(cd));
+                double a = AS_FLOAT(cd_pop_val(cd));
+                cd_push(cd, BOOL_VAL(a < b));
+                break;
+            }
+            case OP_FNEGATE:
+                cd_push(cd, FLOAT_VAL(-AS_FLOAT(cd_pop_val(cd))));
+                break;
             case OP_NOT:
                 cd_push(cd, BOOL_VAL(!AS_BOOL(cd_pop_val(cd))));
                 break;
@@ -282,4 +307,5 @@ int cd_vm_run(cd_State* cd) {
 #undef READ_CONSTANT
 #undef READ_STRING
 #undef BINARY_INT_OP
+#undef BINARY_FLOAT_OP
 }

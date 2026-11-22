@@ -267,6 +267,8 @@ static DataType parse_precedence(Precedence precedence);
 static DataType type_from_token(TokenType type) {
     switch (type) {
         case TOKEN_KW_INT: return TYPE_INT;
+        case TOKEN_KW_FLOAT: return TYPE_FLOAT;
+        case TOKEN_KW_DOUBLE: return TYPE_DOUBLE;
         case TOKEN_KW_BOOL: return TYPE_BOOL;
         case TOKEN_KW_STRING: return TYPE_STRING;
         case TOKEN_KW_VOID: return TYPE_VOID;
@@ -278,6 +280,8 @@ static const char* type_name(DataType type) {
     switch (type) {
         case TYPE_VOID: return "void";
         case TYPE_INT: return "int";
+        case TYPE_FLOAT: return "float";
+        case TYPE_DOUBLE: return "double";
         case TYPE_BOOL: return "bool";
         case TYPE_STRING: return "string";
         case TYPE_ANY: return "any";
@@ -285,9 +289,19 @@ static const char* type_name(DataType type) {
     return "unknown";
 }
 
+static bool is_float_type(DataType t) {
+    return t == TYPE_FLOAT || t == TYPE_DOUBLE;
+}
+
+static bool types_compatible(DataType a, DataType b) {
+    if (a == TYPE_ANY || b == TYPE_ANY) return true;
+    if (a == b) return true;
+    if (is_float_type(a) && is_float_type(b)) return true;
+    return false;
+}
+
 static void check_type_match(DataType expected, DataType actual, const char* msg) {
-    if (expected == TYPE_ANY || actual == TYPE_ANY) return;
-    if (expected != actual) {
+    if (!types_compatible(expected, actual)) {
         char buffer[128];
         snprintf(buffer, sizeof(buffer), "%s (expected %s, got %s)", msg, type_name(expected), type_name(actual));
         error(buffer);
@@ -321,6 +335,8 @@ static DataType parse_variable(Token name, bool canAssign) {
         DataType valType = expression();
         if (varType == TYPE_INT && valType == TYPE_INT) {
             emit_byte(OP_ADD);
+        } else if (is_float_type(varType) && is_float_type(valType)) {
+            emit_byte(OP_FADD);
         } else if (varType == TYPE_STRING && valType == TYPE_STRING) {
             emit_byte(OP_ADD);
         } else {
@@ -331,11 +347,15 @@ static DataType parse_variable(Token name, bool canAssign) {
     } else if (canAssign && match(TOKEN_MINUS_EQUAL)) {
         emit_bytes(getOp, (uint8_t)arg);
         DataType valType = expression();
-        check_type_match(TYPE_INT, varType, "'-=' requires int variable");
-        check_type_match(TYPE_INT, valType, "'-=' requires int value");
-        emit_byte(OP_SUB);
+        if (varType == TYPE_INT && valType == TYPE_INT) {
+            emit_byte(OP_SUB);
+        } else if (is_float_type(varType) && is_float_type(valType)) {
+            emit_byte(OP_FSUB);
+        } else {
+            error("Invalid operands for '-='.");
+        }
         emit_bytes(setOp, (uint8_t)arg);
-        return TYPE_INT;
+        return varType;
     }
 
     emit_bytes(getOp, (uint8_t)arg);
@@ -389,6 +409,11 @@ static DataType primary(bool canAssign) {
         emit_constant(INT_VAL(value));
         return TYPE_INT;
     }
+    if (match(TOKEN_FLOAT)) {
+        double value = strtod(parser.previous.start, NULL);
+        emit_constant(FLOAT_VAL(value));
+        return TYPE_DOUBLE;
+    }
     if (match(TOKEN_STRING)) {
         const char* s = parser.previous.start + 1;
         int len = parser.previous.length - 2;
@@ -418,9 +443,15 @@ static DataType primary(bool canAssign) {
     }
     if (match(TOKEN_MINUS)) {
         DataType type = parse_precedence(PREC_UNARY);
-        check_type_match(TYPE_INT, type, "Operand of '-' must be int");
-        emit_byte(OP_NEGATE);
-        return TYPE_INT;
+        if (type == TYPE_INT) {
+            emit_byte(OP_NEGATE);
+            return TYPE_INT;
+        } else if (is_float_type(type)) {
+            emit_byte(OP_FNEGATE);
+            return type;
+        }
+        error("Operand of '-' must be int, float or double.");
+        return TYPE_ANY;
     }
     if (match(TOKEN_BANG)) {
         DataType type = parse_precedence(PREC_UNARY);
@@ -502,30 +533,48 @@ static DataType parse_precedence(Precedence precedence) {
                 if (leftType == TYPE_INT && rightType == TYPE_INT) {
                     emit_byte(OP_ADD);
                     leftType = TYPE_INT;
+                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                    emit_byte(OP_FADD);
+                    leftType = TYPE_DOUBLE;
                 } else if (leftType == TYPE_STRING && rightType == TYPE_STRING) {
                     emit_byte(OP_ADD);
                     leftType = TYPE_STRING;
                 } else {
-                    error("Operands of '+' must be both ints or both strings.");
+                    error("Invalid operands for '+'.");
                 }
                 break;
             case TOKEN_MINUS:
-                check_type_match(TYPE_INT, leftType, "Left operand of '-' must be int");
-                check_type_match(TYPE_INT, rightType, "Right operand of '-' must be int");
-                emit_byte(OP_SUB);
-                leftType = TYPE_INT;
+                if (leftType == TYPE_INT && rightType == TYPE_INT) {
+                    emit_byte(OP_SUB);
+                    leftType = TYPE_INT;
+                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                    emit_byte(OP_FSUB);
+                    leftType = TYPE_DOUBLE;
+                } else {
+                    error("Invalid operands for '-'.");
+                }
                 break;
             case TOKEN_STAR:
-                check_type_match(TYPE_INT, leftType, "Left operand of '*' must be int");
-                check_type_match(TYPE_INT, rightType, "Right operand of '*' must be int");
-                emit_byte(OP_MUL);
-                leftType = TYPE_INT;
+                if (leftType == TYPE_INT && rightType == TYPE_INT) {
+                    emit_byte(OP_MUL);
+                    leftType = TYPE_INT;
+                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                    emit_byte(OP_FMUL);
+                    leftType = TYPE_DOUBLE;
+                } else {
+                    error("Invalid operands for '*'.");
+                }
                 break;
             case TOKEN_SLASH:
-                check_type_match(TYPE_INT, leftType, "Left operand of '/' must be int");
-                check_type_match(TYPE_INT, rightType, "Right operand of '/' must be int");
-                emit_byte(OP_DIV);
-                leftType = TYPE_INT;
+                if (leftType == TYPE_INT && rightType == TYPE_INT) {
+                    emit_byte(OP_DIV);
+                    leftType = TYPE_INT;
+                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                    emit_byte(OP_FDIV);
+                    leftType = TYPE_DOUBLE;
+                } else {
+                    error("Invalid operands for '/'.");
+                }
                 break;
             case TOKEN_PERCENT:
                 check_type_match(TYPE_INT, leftType, "Left operand of '%' must be int");
@@ -544,27 +593,43 @@ static DataType parse_precedence(Precedence precedence) {
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_GREATER:
-                check_type_match(TYPE_INT, leftType, "Left operand of '>' must be int");
-                check_type_match(TYPE_INT, rightType, "Right operand of '>' must be int");
-                emit_byte(OP_GREATER);
+                if (leftType == TYPE_INT && rightType == TYPE_INT) {
+                    emit_byte(OP_GREATER);
+                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                    emit_byte(OP_FGREATER);
+                } else {
+                    error("Operands of '>' must be numeric.");
+                }
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_GREATER_EQUAL:
-                check_type_match(TYPE_INT, leftType, "Left operand of '>=' must be int");
-                check_type_match(TYPE_INT, rightType, "Right operand of '>=' must be int");
-                emit_bytes(OP_LESS, OP_NOT);
+                if (leftType == TYPE_INT && rightType == TYPE_INT) {
+                    emit_bytes(OP_LESS, OP_NOT);
+                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                    emit_bytes(OP_FLESS, OP_NOT);
+                } else {
+                    error("Operands of '>=' must be numeric.");
+                }
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_LESS:
-                check_type_match(TYPE_INT, leftType, "Left operand of '<' must be int");
-                check_type_match(TYPE_INT, rightType, "Right operand of '<' must be int");
-                emit_byte(OP_LESS);
+                if (leftType == TYPE_INT && rightType == TYPE_INT) {
+                    emit_byte(OP_LESS);
+                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                    emit_byte(OP_FLESS);
+                } else {
+                    error("Operands of '<' must be numeric.");
+                }
                 leftType = TYPE_BOOL;
                 break;
             case TOKEN_LESS_EQUAL:
-                check_type_match(TYPE_INT, leftType, "Left operand of '<=' must be int");
-                check_type_match(TYPE_INT, rightType, "Right operand of '<=' must be int");
-                emit_bytes(OP_GREATER, OP_NOT);
+                if (leftType == TYPE_INT && rightType == TYPE_INT) {
+                    emit_bytes(OP_GREATER, OP_NOT);
+                } else if (is_float_type(leftType) && is_float_type(rightType)) {
+                    emit_bytes(OP_FGREATER, OP_NOT);
+                } else {
+                    error("Operands of '<=' must be numeric.");
+                }
                 leftType = TYPE_BOOL;
                 break;
             default:
@@ -603,6 +668,7 @@ static void var_declaration(DataType type, Token name) {
         check_type_match(type, valType, "Type mismatch in variable initialization");
     } else {
         if (type == TYPE_INT) emit_constant(INT_VAL(0));
+        else if (is_float_type(type)) emit_constant(FLOAT_VAL(0.0));
         else if (type == TYPE_BOOL) emit_byte(OP_FALSE);
         else emit_byte(OP_NIL);
     }
@@ -768,7 +834,8 @@ static void function_declaration(DataType retType, Token name) {
                 error_at_current("Can't have more than 16 parameters.");
             }
             TokenType pt = parser.current.type;
-            if (pt != TOKEN_KW_INT && pt != TOKEN_KW_BOOL && pt != TOKEN_KW_STRING) {
+            if (pt != TOKEN_KW_INT && pt != TOKEN_KW_FLOAT && pt != TOKEN_KW_DOUBLE &&
+                pt != TOKEN_KW_BOOL && pt != TOKEN_KW_STRING) {
                 error_at_current("Expect parameter type.");
             }
             advance();
@@ -806,7 +873,8 @@ static void function_declaration(DataType retType, Token name) {
 
 static void declaration(void) {
     TokenType t = parser.current.type;
-    if (t == TOKEN_KW_INT || t == TOKEN_KW_BOOL || t == TOKEN_KW_STRING || t == TOKEN_KW_VOID) {
+    if (t == TOKEN_KW_INT || t == TOKEN_KW_FLOAT || t == TOKEN_KW_DOUBLE ||
+        t == TOKEN_KW_BOOL || t == TOKEN_KW_STRING || t == TOKEN_KW_VOID) {
         advance();
         DataType dt = type_from_token(t);
         consume(TOKEN_IDENTIFIER, "Expect identifier.");
