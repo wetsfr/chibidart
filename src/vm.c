@@ -14,6 +14,9 @@ void cd_vm_init(cd_State* cd) {
     cd->globalSymbols = NULL;
     cd->globalSymbolCount = 0;
     cd->globalSymbolCapacity = 0;
+    cd->classInfos = NULL;
+    cd->classInfoCount = 0;
+    cd->classInfoCapacity = 0;
     table_init(&cd->globals);
     table_init(&cd->strings);
 }
@@ -33,6 +36,12 @@ void cd_vm_free(cd_State* cd) {
     cd->grayStack = NULL;
     CD_FREE_ARRAY(GlobalSymbol, cd->globalSymbols, cd->globalSymbolCapacity);
     cd->globalSymbols = NULL;
+    for (int i = 0; i < cd->classInfoCount; i++) {
+        CD_FREE_ARRAY(ClassField, cd->classInfos[i].fields, cd->classInfos[i].fieldCapacity);
+        CD_FREE_ARRAY(ClassMethod, cd->classInfos[i].methods, cd->classInfos[i].methodCapacity);
+    }
+    CD_FREE_ARRAY(ClassInfo, cd->classInfos, cd->classInfoCapacity);
+    cd->classInfos = NULL;
 }
 
 void cd_push(cd_State* cd, Value value) {
@@ -503,6 +512,48 @@ int cd_vm_run(cd_State* cd) {
                     return CD_ERR_RUNTIME;
                 }
                 cd_push(cd, val);
+                break;
+            }
+            case OP_SLICE: {
+                Value endVal = cd_peek(cd, 0);
+                Value startVal = cd_peek(cd, 1);
+                Value target = cd_peek(cd, 2);
+                if (!IS_INT(startVal) || (!IS_NIL(endVal) && !IS_INT(endVal))) {
+                    cd_runtime_error(cd, "Slice bounds must be integers.");
+                    return CD_ERR_RUNTIME;
+                }
+                int64_t start = AS_INT(startVal);
+                if (IS_LIST(target)) {
+                    ObjList* list = AS_LIST(target);
+                    int64_t end = IS_NIL(endVal) ? (int64_t)list->count : AS_INT(endVal);
+                    if (start < 0) start = 0;
+                    if (end > (int64_t)list->count) end = (int64_t)list->count;
+                    if (end < start) end = start;
+                    ObjList* sliced = cd_new_list(cd);
+                    cd_push(cd, OBJ_VAL(sliced));
+                    for (int64_t i = start; i < end; i++) {
+                        list_append(sliced, list->items[i]);
+                    }
+                    cd_pop_val(cd);
+                    cd_pop_val(cd);
+                    cd_pop_val(cd);
+                    cd_pop_val(cd);
+                    cd_push(cd, OBJ_VAL(sliced));
+                } else if (IS_STRING(target)) {
+                    ObjString* s = AS_STRING(target);
+                    int64_t end = IS_NIL(endVal) ? (int64_t)s->length : AS_INT(endVal);
+                    if (start < 0) start = 0;
+                    if (end > (int64_t)s->length) end = (int64_t)s->length;
+                    if (end < start) end = start;
+                    ObjString* sliced = cd_copy_string(cd, s->chars + start, (int)(end - start));
+                    cd_pop_val(cd);
+                    cd_pop_val(cd);
+                    cd_pop_val(cd);
+                    cd_push(cd, OBJ_VAL(sliced));
+                } else {
+                    cd_runtime_error(cd, "Cannot slice non-sequence value.");
+                    return CD_ERR_RUNTIME;
+                }
                 break;
             }
             case OP_CLASS: {

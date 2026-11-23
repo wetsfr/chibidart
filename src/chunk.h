@@ -42,6 +42,7 @@ typedef enum {
     OP_BUILD_MAP,
     OP_GET_INDEX,
     OP_SET_INDEX,
+    OP_SLICE,
     OP_GET_PROP,
     OP_SET_PROP,
     OP_INVOKE_PROP,

@@ -12,10 +12,33 @@ typedef struct Compiler Compiler;
 
 typedef struct {
     ObjString* name;
-    DataType type;
+    TypeInfo type;
+} ClassField;
+
+typedef struct {
+    ObjString* name;
     int arity;
-    DataType paramTypes[16];
-    DataType returnType;
+    TypeInfo paramTypes[16];
+    TypeInfo returnType;
+} ClassMethod;
+
+typedef struct {
+    ObjString* name;
+    ClassField* fields;
+    int fieldCount;
+    int fieldCapacity;
+    ClassMethod* methods;
+    int methodCount;
+    int methodCapacity;
+} ClassInfo;
+
+typedef struct {
+    ObjString* name;
+    TypeInfo type;
+    int arity;
+    TypeInfo paramTypes[16];
+    TypeInfo returnType;
+    bool isFunction;
 } GlobalSymbol;
 
 typedef struct {
@@ -42,6 +65,9 @@ struct cd_State {
     GlobalSymbol* globalSymbols;
     int globalSymbolCount;
     int globalSymbolCapacity;
+    ClassInfo* classInfos;
+    int classInfoCount;
+    int classInfoCapacity;
 };
 
 void cd_vm_init(cd_State* cd);

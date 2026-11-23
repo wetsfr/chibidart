@@ -261,6 +261,18 @@ void cd_register(cd_State* cd, const char* name, cd_CFunction fn) {
     table_set(&cd->globals, str, OBJ_VAL(nat));
     cd_pop_val(cd);
     cd_pop_val(cd);
+
+    if (cd->globalSymbolCount >= cd->globalSymbolCapacity) {
+        int oldCap = cd->globalSymbolCapacity;
+        cd->globalSymbolCapacity = CD_GROW_CAPACITY(oldCap);
+        cd->globalSymbols = CD_GROW_ARRAY(GlobalSymbol, cd->globalSymbols, oldCap, cd->globalSymbolCapacity);
+    }
+    GlobalSymbol* sym = &cd->globalSymbols[cd->globalSymbolCount++];
+    sym->name = str;
+    sym->type = (TypeInfo){TYPE_ANY, NULL, TYPE_ANY, TYPE_ANY, TYPE_ANY};
+    sym->arity = -1;
+    sym->returnType = (TypeInfo){TYPE_ANY, NULL, TYPE_ANY, TYPE_ANY, TYPE_ANY};
+    sym->isFunction = true;
 }
 
 int cd_pcall(cd_State* cd, int nargs, int nresults) {

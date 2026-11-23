@@ -28,6 +28,14 @@ typedef enum {
     TYPE_ANY
 } DataType;
 
+typedef struct {
+    DataType kind;
+    ObjString* className;
+    DataType elemType;
+    DataType keyType;
+    DataType valType;
+} TypeInfo;
+
 typedef enum {
     VAL_NIL,
     VAL_BOOL,

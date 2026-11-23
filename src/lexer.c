@@ -111,9 +111,21 @@ static TokenType check_keyword(Lexer* lexer, int start, int length, const char* 
 static TokenType identifier_type(Lexer* lexer) {
     switch (lexer->start[0]) {
         case 'b':
-            return check_keyword(lexer, 1, 3, "ool", TOKEN_KW_BOOL);
+            if (lexer->current - lexer->start > 1) {
+                switch (lexer->start[1]) {
+                    case 'o': return check_keyword(lexer, 2, 2, "ol", TOKEN_KW_BOOL);
+                    case 'r': return check_keyword(lexer, 2, 3, "eak", TOKEN_KW_BREAK);
+                }
+            }
+            break;
         case 'c':
-            return check_keyword(lexer, 1, 4, "lass", TOKEN_KW_CLASS);
+            if (lexer->current - lexer->start > 1) {
+                switch (lexer->start[1]) {
+                    case 'l': return check_keyword(lexer, 2, 3, "ass", TOKEN_KW_CLASS);
+                    case 'o': return check_keyword(lexer, 2, 6, "ntinue", TOKEN_KW_CONTINUE);
+                }
+            }
+            break;
         case 'd':
             return check_keyword(lexer, 1, 5, "ouble", TOKEN_KW_DOUBLE);
         case 'e':
@@ -216,8 +228,10 @@ Token lexer_next(Lexer* lexer) {
         case ',': return make_token(lexer, TOKEN_COMMA);
         case '.': return make_token(lexer, TOKEN_DOT);
         case '+':
+            if (match(lexer, '+')) return make_token(lexer, TOKEN_PLUS_PLUS);
             return make_token(lexer, match(lexer, '=') ? TOKEN_PLUS_EQUAL : TOKEN_PLUS);
         case '-':
+            if (match(lexer, '-')) return make_token(lexer, TOKEN_MINUS_MINUS);
             return make_token(lexer, match(lexer, '=') ? TOKEN_MINUS_EQUAL : TOKEN_MINUS);
         case '*': return make_token(lexer, TOKEN_STAR);
         case '/': return make_token(lexer, TOKEN_SLASH);

@@ -631,7 +631,28 @@ static void mark_roots(cd_State* cd) {
     }
     mark_table(cd, &cd->globals);
     for (int i = 0; i < cd->globalSymbolCount; i++) {
-        cd_mark_object(cd, (Obj*)cd->globalSymbols[i].name);
+        GlobalSymbol* sym = &cd->globalSymbols[i];
+        cd_mark_object(cd, (Obj*)sym->name);
+        cd_mark_object(cd, (Obj*)sym->type.className);
+        cd_mark_object(cd, (Obj*)sym->returnType.className);
+        for (int j = 0; j < sym->arity; j++) {
+            cd_mark_object(cd, (Obj*)sym->paramTypes[j].className);
+        }
+    }
+    for (int i = 0; i < cd->classInfoCount; i++) {
+        ClassInfo* ci = &cd->classInfos[i];
+        cd_mark_object(cd, (Obj*)ci->name);
+        for (int j = 0; j < ci->fieldCount; j++) {
+            cd_mark_object(cd, (Obj*)ci->fields[j].name);
+            cd_mark_object(cd, (Obj*)ci->fields[j].type.className);
+        }
+        for (int j = 0; j < ci->methodCount; j++) {
+            cd_mark_object(cd, (Obj*)ci->methods[j].name);
+            cd_mark_object(cd, (Obj*)ci->methods[j].returnType.className);
+            for (int k = 0; k < ci->methods[j].arity; k++) {
+                cd_mark_object(cd, (Obj*)ci->methods[j].paramTypes[k].className);
+            }
+        }
     }
     cd_mark_compiler_roots(cd);
 }
